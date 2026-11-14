@@ -1,0 +1,21 @@
+# TSAN_OPTIONS=suppressions=mcp/tests/tsan_mcp.supp (build_test.sh --tsan)
+#
+# libduckdb.so comes from DuckDB's release archive and is NOT instrumented, so TSan cannot see the happens-before
+# edges DuckDB's own worker threads create (its shared_ptr<Event>/Task reference counts, its scheduler queues).
+# libstdc++ inlines a non-atomic reference-count path into our instrumented code while the process is still
+# single-threaded (std::__libc_single_threaded), and TSan then reports a race against DuckDB's later atomic updates.
+# These are reports about DuckDB's internals, not about this server. Everything else, including every report that
+# starts in src/ (jsonrpc_server, transport_*, concurrency, db), stays fatal.
+race:libduckdb.so
+called_from_lib:libduckdb.so
+race:__gnu_cxx::__exchange_and_add
+deadlock:libduckdb.so
+mutex:libduckdb.so
+# The extension under test (fractalsql.<ver>.<platform>.duckdb_extension) is the release build, also uninstrumented:
+# TSan sees its malloc/free and its mutexes but not the synchronisation in between, so a report whose racing frame is
+# inside it (for example a pthread_mutex_lock in a heap block the extension itself allocated) cannot be judged. The
+# extension's threading is covered by the extension gates; --tsan judges the MCP server's own code.
+race:duckdb_extension
+deadlock:duckdb_extension
+mutex:duckdb_extension
+called_from_lib:duckdb_extension

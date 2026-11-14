@@ -1,11 +1,12 @@
-name: Release duckdb-fractalsql Packages
+name: Release fractalsql-ext Packages
 
-# Tag-triggered: pushing vX.Y.Z builds every (duckdb_version, platform)
-# cell, smoke-tests linux_amd64 per version, and uploads all artifacts
-# to the GitHub Release.
+# Tag-triggered: pushing vX.Y.Z builds the pure-C extension for every
+# (duckdb_version, platform) cell, smoke-tests linux_amd64 per version, and
+# publishes one bundle per (duckdb_version, platform) to the GitHub Release. DuckDB versions: v1.4.5
+# (the 1.4 band), v1.5.6 and v2.0.0 (the stable-API band, one binary).
 #
 # If a fix lands AFTER the tag was cut, force-push the tag to the new
-# commit — CI rebuilds from the tag's SHA, not the branch head.
+# commit -- CI rebuilds from the tag's SHA, not the branch head.
 on:
   push:
     tags:
@@ -15,39 +16,44 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # --------------------------------------------------------------------
   # Linux: matrix over (duckdb_version) × (amd64, arm64). QEMU+Buildx
-  # for arm64. Smoke test runs on amd64 only — getting matching duckdb
+  # for arm64. Smoke test runs on amd64 only -- getting matching duckdb
   # CLIs to work under QEMU is flaky and the link-step assertions
   # already validate the arm64 ABI.
   # --------------------------------------------------------------------
   linux:
     name: linux ${{ matrix.arch }} @ ${{ matrix.duckdb_version }}
-    # Native arm64 via GitHub's ubuntu-24.04-arm runner. Earlier
-    # iterations used ubuntu-latest + QEMU, which turned a ~20-30 min
-    # DuckDB compile into 90+ min because every instruction paid the
-    # cost of x86->aarch64 translation. Native arm64 runners have been
-    # GA since 2025 and run the same Docker + buildx stack.
+    # Native arm64 via GitHub's ubuntu-24.04-arm runner. Native arm64
+    # runners have been GA since 2025 and run the same Docker + buildx
+    # stack -- no QEMU translation cost on cross-arch builds.
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
+      # 6 cells = 3 DuckDB versions x 2 arches. Each cell builds the pure-C extension in rockylinux:9 (glibc 2.34)
+      # and packages its own DuckDB version: v1.4.5 is the 1.4 band, v1.5.6 and v2.0.0 are the stable-API band (one
+      # binary that loads on both). The glibc ceiling is checked inside the image (docker/Dockerfile).
       matrix:
-        duckdb_version: [v1.2.2, v1.4.4, v1.5.2]
+        duckdb_version: [v1.4.5, v1.5.6, v2.0.0]
         arch: [amd64, arm64]
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - arch: arm64
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Install packaging tools
         run: |
@@ -56,25 +62,15 @@ jobs:
 
       - name: Build fractalsql.duckdb_extension
         env:
-          # Scope per (version, arch) so cells don't clobber each
-          # other's BuildKit cache. Native runners on both arches, so
-          # cold builds are ~20-30 min each; subsequent runs warm-hit.
           BUILDX_CACHE_ARGS: >-
-            --cache-from=type=gha,scope=duckdb-fractalsql-${{ matrix.duckdb_version }}-${{ matrix.arch }}
-            --cache-to=type=gha,scope=duckdb-fractalsql-${{ matrix.duckdb_version }}-${{ matrix.arch }},mode=max
-          DUCKDB_VERSION: ${{ matrix.duckdb_version }}
+            --cache-from=type=gha,scope=fractalsql-ext-${{ matrix.arch }}
+            --cache-to=type=gha,scope=fractalsql-ext-${{ matrix.arch }},mode=max
         run: |
           chmod +x build.sh
           ./build.sh ${{ matrix.arch }}
 
-      # Smoke-test only on native amd64. We download the matching
-      # duckdb CLI for this DuckDB version, LOAD the extension, and
-      # run the convergence + vectorized-execution assertions in
-      # test/smoke_test.sql.
-      #
-      # -unsigned is mandatory: Community extensions aren't signed
-      # and DuckDB 1.1+ rejects SET allow_unsigned_extensions=true
-      # after the DB is open.
+      # Smoke test on amd64 only (a matching CLI under QEMU is flaky). The glibc ceiling, size and
+      # one-exported-symbol posture are checked inside the image for both arches (docker/Dockerfile).
       - name: Smoke test in DuckDB CLI
         if: matrix.arch == 'amd64'
         env:
@@ -82,11 +78,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          curl -fsSL \
-            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip" \
-            -o /tmp/duckdb_cli.zip
-          unzip -p /tmp/duckdb_cli.zip duckdb > /tmp/duckdb
-          chmod +x /tmp/duckdb
+          bash scripts/fetch_duckdb.sh cli "${DUCKDB_VERSION}" linux amd64 /tmp/duckdb-cli
+          ln -sf /tmp/duckdb-cli/duckdb /tmp/duckdb
           /tmp/duckdb --version
 
           EXT_PATH="$(pwd)/dist/amd64/fractalsql.${DUCKDB_VERSION}.linux_amd64.duckdb_extension"
@@ -94,7 +87,7 @@ jobs:
 
           # Bisect the crash: run minimal probes in sequence so we
           # know exactly which statement triggers the abort. Each
-          # invocation is its own process — a crash in one doesn't
+          # invocation is its own process -- a crash in one doesn't
           # affect subsequent probes.
           probe () {
               local label="$1"; shift
@@ -106,14 +99,14 @@ jobs:
           }
 
           probe "load-only"        "SELECT 1;"
-          probe "edition"          "SELECT fractalsql_edition();"
-          probe "version"          "SELECT fractalsql_version();"
+          probe "edition"          "SELECT fractal_edition();"
+          probe "version"          "SELECT fractal_version();"
           probe "functions-visible" \
               "SELECT function_name FROM duckdb_functions() WHERE function_name LIKE 'fractal%';"
           probe "fractal-search-scalar" \
               "SELECT fractal_search([0.6, 0.8]::DOUBLE[], [0.6, 0.8]::DOUBLE[]);"
 
-          # Full smoke test last — if earlier probes pass, this tells
+          # Full smoke test last -- if earlier probes pass, this tells
           # us whether the crash is in the vectorized-execution path.
           probe "full-smoke-test"  "$(cat test/smoke_test.sql)"
           echo "smoke test passed on DuckDB ${DUCKDB_VERSION}"
@@ -126,24 +119,16 @@ jobs:
           scripts/package.sh ${{ matrix.arch }}
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: duckdb-fractalsql-${{ matrix.duckdb_version }}-linux_${{ matrix.arch }}
+          name: fractalsql-ext-${{ matrix.duckdb_version }}-linux_${{ matrix.arch }}
           path: dist/packages/*
           if-no-files-found: error
 
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/packages/*
-          fail_on_unmatched_files: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   # --------------------------------------------------------------------
-  # macOS: native GitHub runners for Intel (macos-13) and Apple
-  # Silicon (macos-14). DuckDB ships native headers for both arches;
-  # no cross-compile. No smoke test here — the link-step assertions
+  # macOS: native GitHub runners for Intel (macos-15-intel) and Apple
+  # Silicon (macos-15). DuckDB ships native headers for both arches;
+  # no cross-compile. No smoke test here -- the link-step assertions
   # validate the ABI and matching-arch duckdb CLIs on GH runners add
   # flake without coverage.
   # --------------------------------------------------------------------
@@ -152,63 +137,42 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        duckdb_version: [v1.2.2, v1.4.4, v1.5.2]
+        duckdb_version: [v1.4.5, v1.5.6, v2.0.0]
+        # platform_tag is a matrix axis: include rows that only add keys would be applied to every cell in turn
+        # and overwrite one another, so only the last row (osx_arm64) would ever build.
+        platform_tag: [osx_amd64, osx_arm64]
         include:
-          - runner: macos-13
-            platform_tag: osx_amd64
+          - platform_tag: osx_amd64
+            runner: macos-15-intel
             duckdb_platform: osx_amd64
-          - runner: macos-14
-            platform_tag: osx_arm64
+          - platform_tag: osx_arm64
+            runner: macos-15
             duckdb_platform: osx_arm64
     runs-on: ${{ matrix.runner }}
-    # LuaJIT's Makefile hard-requires MACOSX_DEPLOYMENT_TARGET in the
-    # environment on Darwin (src/Makefile bails with "missing: export
-    # MACOSX_DEPLOYMENT_TARGET=XX.YY"). 11.0 is the oldest target
-    # supporting both Intel and Apple Silicon; pick it so the same
-    # pin works on macos-13 and macos-14 runners. Set at job scope so
-    # both the LuaJIT build and DuckDB/extension build see it.
+    # 11.0 is the oldest target supporting both Intel and Apple Silicon; the same pin works on macos-15-intel and macos-15.
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install build deps
-        run: |
-          set -euo pipefail
-          brew install cmake ninja ccache git || true
-
-      - name: Build LuaJIT static
-        run: |
-          set -euo pipefail
-          git clone --depth=1 --branch v2.1 \
-              https://github.com/LuaJIT/LuaJIT.git /tmp/luajit
-          ( cd /tmp/luajit
-            unset TARGET_ARCH
-            make BUILDMODE=static XCFLAGS="-fPIC" \
-                 PREFIX=/tmp/luajit-install \
-                 -j$(sysctl -n hw.ncpu) TARGET_ARCH=
-            make install BUILDMODE=static PREFIX=/tmp/luajit-install )
-          test -f /tmp/luajit-install/lib/libluajit-5.1.a
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Build fractalsql.duckdb_extension
         env:
           DUCKDB_VERSION: ${{ matrix.duckdb_version }}
         run: |
           set -euo pipefail
-          cmake -S . -B build-macos -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DBUILD_ARCH=$([ "${{ matrix.platform_tag }}" = "osx_arm64" ] && echo arm64 || echo amd64) \
-              -DDUCKDB_VERSION=${DUCKDB_VERSION} \
-              -DDUCKDB_PLATFORM=${{ matrix.duckdb_platform }} \
-              -DLUAJIT_STATIC_LIB_PATH=/tmp/luajit-install/lib/libluajit-5.1.a \
-              -DLUAJIT_INCLUDE_DIR=/tmp/luajit-install/include/luajit-2.1
-          cmake --build build-macos -j$(sysctl -n hw.ncpu) --target fractalsql_extension
-
+          # The pure-C extension: a native make, no DuckDB source, no extra dependencies. It writes both bands to
+          # dist/<platform>/; this cell takes the one for its DuckDB version (1.4.x has its own band; 1.5.6 and
+          # 2.0.0 share the stable-API band).
+          make
           OUT_DIR="dist/${{ matrix.platform_tag }}"
           OUT_NAME="fractalsql.${DUCKDB_VERSION}.${{ matrix.platform_tag }}.duckdb_extension"
-          mkdir -p "${OUT_DIR}"
-          cp build-macos/fractalsql.duckdb_extension "${OUT_DIR}/${OUT_NAME}"
+          case "${DUCKDB_VERSION}" in
+            v1.4.*) FROM="${OUT_DIR}/${OUT_NAME}" ;;
+            *)      FROM="${OUT_DIR}/fractalsql.capi.${{ matrix.platform_tag }}.duckdb_extension"
+                    cp "${FROM}" "${OUT_DIR}/${OUT_NAME}" ;;
+          esac
+          test -f "${OUT_DIR}/${OUT_NAME}"
           ls -l "${OUT_DIR}/${OUT_NAME}"
           otool -L "${OUT_DIR}/${OUT_NAME}" || true
 
@@ -217,40 +181,47 @@ jobs:
           DUCKDB_VERSION: ${{ matrix.duckdb_version }}
         run: |
           set -euo pipefail
-          VERSION="1.0.0"
+          VERSION="2.0.0"
           DIST_DIR="dist/packages"
           mkdir -p "${DIST_DIR}"
           EXT_NAME="fractalsql.${DUCKDB_VERSION}.${{ matrix.platform_tag }}.duckdb_extension"
           SRC="dist/${{ matrix.platform_tag }}/${EXT_NAME}"
           cp "${SRC}" "${DIST_DIR}/${EXT_NAME}"
 
+          # The reasoning plugin and its detached Ed25519 signature: standalone release assets
+          # (what easy_install fetches) and inside the zip. The plugin loads only with the .sig beside it.
+          case "${{ matrix.platform_tag }}" in
+              osx_arm64) PLUGIN_INC="darwin-arm64" ;;
+              osx_amd64) PLUGIN_INC="darwin-x86_64" ;;
+              *) echo "unexpected platform ${{ matrix.platform_tag }}" >&2; exit 1 ;;
+          esac
+          PLUGIN="include/${PLUGIN_INC}/fractalsql-reasoning-http.so"
+          [ -f "${PLUGIN}" ] || { echo "missing ${PLUGIN}" >&2; exit 1; }
+          [ "$(wc -c < "${PLUGIN}.sig")" -eq 64 ] || { echo "missing or invalid ${PLUGIN}.sig (needs 64 bytes)" >&2; exit 1; }
+          cp "${PLUGIN}"     "${DIST_DIR}/fractalsql-reasoning-http.${{ matrix.platform_tag }}.so"
+          cp "${PLUGIN}.sig" "${DIST_DIR}/fractalsql-reasoning-http.${{ matrix.platform_tag }}.so.sig"
+
           STAGE="$(mktemp -d)"
           cp "${SRC}"                 "${STAGE}/${EXT_NAME}"
+          cp "${PLUGIN}"              "${STAGE}/fractalsql-reasoning-http.so"
+          cp "${PLUGIN}.sig"          "${STAGE}/fractalsql-reasoning-http.so.sig"
           cp LICENSE                  "${STAGE}/LICENSE"
           cp THIRD-PARTY-NOTICES.md   "${STAGE}/LICENSE-THIRD-PARTY"
           cp sql/load_extension.sql   "${STAGE}/load_extension.sql"
           cat > "${STAGE}/README.txt" <<EOF
-          duckdb-fractalsql ${VERSION} Community (${DUCKDB_VERSION} / ${{ matrix.platform_tag }})
+          fractalsql-ext ${VERSION} Community (${DUCKDB_VERSION} / ${{ matrix.platform_tag }})
           Load: duckdb -unsigned -cmd "LOAD '\$(pwd)/${EXT_NAME}';"
           EOF
-          ( cd "${STAGE}" && zip -9 -r "${OLDPWD}/${DIST_DIR}/duckdb-fractalsql-${DUCKDB_VERSION}-${{ matrix.platform_tag }}.zip" . > /dev/null )
+          ( cd "${STAGE}" && zip -9 -r "${OLDPWD}/${DIST_DIR}/fractalsql-ext-${DUCKDB_VERSION}-${{ matrix.platform_tag }}.zip" . > /dev/null )
           rm -rf "${STAGE}"
           ls -l "${DIST_DIR}"
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: duckdb-fractalsql-${{ matrix.duckdb_version }}-${{ matrix.platform_tag }}
+          name: fractalsql-ext-${{ matrix.duckdb_version }}-${{ matrix.platform_tag }}
           path: dist/packages/*
           if-no-files-found: error
-
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/packages/*
-          fail_on_unmatched_files: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # --------------------------------------------------------------------
   # Windows x64. windows_arm64 is skipped: DuckDB doesn't publish a
@@ -263,37 +234,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        duckdb_version: [v1.2.2, v1.4.4, v1.5.2]
+        duckdb_version: [v1.4.5, v1.5.6, v2.0.0]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Ninja
-        run: choco install -y ninja
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up MSVC
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
         with:
           arch: x64
 
-      - name: Build LuaJIT static
-        shell: cmd
-        run: |
-          git clone --depth=1 --branch v2.1 https://github.com/LuaJIT/LuaJIT.git C:\deps\LuaJIT || exit /b 1
-          REM cmd.exe's `cd <other-drive>:\...` stores the cwd for that
-          REM drive but does NOT switch drives. `cd /D` is the cross-
-          REM drive form. GitHub runners start this job on D:\ so a
-          REM plain `cd C:\...` silently leaves us on D:\ — then
-          REM msvcbuild.bat can't be found.
-          cd /D C:\deps\LuaJIT\src || exit /b 1
-          call msvcbuild.bat static || exit /b 1
-          dir lua51.lib
-
       - name: Build fractalsql.duckdb_extension
         shell: cmd
-        env:
-          DUCKDB_VERSION: ${{ matrix.duckdb_version }}
-          LUAJIT_DIR: C:\deps\LuaJIT\src
         run: |
           call scripts\windows\build.bat
 
@@ -303,41 +255,481 @@ jobs:
           DUCKDB_VERSION: ${{ matrix.duckdb_version }}
         run: |
           $ErrorActionPreference = "Stop"
-          $VERSION = "1.0.0"
+          $VERSION = "2.0.0"
           $DIST_DIR = "dist/packages"
           New-Item -ItemType Directory -Force -Path $DIST_DIR | Out-Null
           $EXT_NAME = "fractalsql.$env:DUCKDB_VERSION.windows_amd64.duckdb_extension"
           $SRC = "dist/windows_amd64/$EXT_NAME"
+          # build.bat writes both bands; the stable-API band file serves DuckDB 1.5.6 and 2.0.0, the 1.4 band is
+          # already named for its 1.4.N.
+          if ($env:DUCKDB_VERSION -notlike 'v1.4.*') {
+            Copy-Item "dist/windows_amd64/fractalsql.capi.windows_amd64.duckdb_extension" $SRC -Force
+          }
           if (!(Test-Path $SRC)) { throw "missing $SRC" }
           Copy-Item $SRC "$DIST_DIR/$EXT_NAME"
+
+          # The reasoning plugin and its detached Ed25519 signature: standalone release assets
+          # (what easy_install fetches) and inside the zip. The plugin loads only with the .sig beside it.
+          $PLUGIN = "include/windows-x86_64/fractalsql-reasoning-http.dll"
+          if (!(Test-Path $PLUGIN)) { throw "missing $PLUGIN" }
+          if (!(Test-Path "$PLUGIN.sig") -or (Get-Item "$PLUGIN.sig").Length -ne 64) { throw "missing or invalid $PLUGIN.sig (needs 64 bytes)" }
+          Copy-Item $PLUGIN       "$DIST_DIR/fractalsql-reasoning-http.windows_amd64.dll"
+          Copy-Item "$PLUGIN.sig" "$DIST_DIR/fractalsql-reasoning-http.windows_amd64.dll.sig"
 
           # Stage then zip via PowerShell's Compress-Archive. zip.exe
           # is not present on GitHub windows-2022 runners' git-bash.
           $STAGE = New-Item -ItemType Directory -Path ([System.IO.Path]::GetTempFileName() + ".d")
           Copy-Item $SRC                        "$STAGE/$EXT_NAME"
+          Copy-Item $PLUGIN                     "$STAGE/fractalsql-reasoning-http.dll"
+          Copy-Item "$PLUGIN.sig"               "$STAGE/fractalsql-reasoning-http.dll.sig"
           Copy-Item LICENSE                     "$STAGE/LICENSE"
           Copy-Item THIRD-PARTY-NOTICES.md      "$STAGE/LICENSE-THIRD-PARTY"
           Copy-Item sql/load_extension.sql      "$STAGE/load_extension.sql"
           @"
-          duckdb-fractalsql $VERSION Community ($env:DUCKDB_VERSION / windows_amd64)
+          fractalsql-ext $VERSION Community ($env:DUCKDB_VERSION / windows_amd64)
           Load: duckdb.exe -unsigned -cmd "LOAD '%cd%\$EXT_NAME';"
           "@ | Set-Content "$STAGE/README.txt" -Encoding utf8
-          $ZIP = "$DIST_DIR/duckdb-fractalsql-$env:DUCKDB_VERSION-windows_amd64.zip"
+          $ZIP = "$DIST_DIR/fractalsql-ext-$env:DUCKDB_VERSION-windows_amd64.zip"
           Compress-Archive -Path "$STAGE/*" -DestinationPath $ZIP -Force
           Remove-Item -Recurse -Force $STAGE
           Get-ChildItem $DIST_DIR
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: duckdb-fractalsql-${{ matrix.duckdb_version }}-windows_amd64
+          name: fractalsql-ext-${{ matrix.duckdb_version }}-windows_amd64
+          path: dist/packages/*
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------
+  # MCP server (mcp/): one archive per (duckdb_version, platform). The server drives DuckDB through the C API, so
+  # each archive carries the libduckdb of the DuckDB release it was built against; it loads the matching
+  # fractalsql extension from the same release (FSQL_DUCKDB_EXTENSION). Linux builds natively on both arches.
+  # --------------------------------------------------------------------
+  mcp-linux:
+    name: mcp linux ${{ matrix.arch }} @ ${{ matrix.duckdb_version }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb_version: [v1.4.5, v1.5.6, v2.0.0]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Package fractalsql-ext-mcp (built in rockylinux:9, glibc 2.34)
+        run: |
+          set -euo pipefail
+          bash scripts/package_mcp_rocky.sh "${{ matrix.duckdb_version }}" "${{ matrix.arch }}"
+          ls -l dist/packages
+
+      - name: Smoke-check the packaged server
+        run: |
+          set -euo pipefail
+          NAME="fractalsql-ext-mcp-${{ matrix.duckdb_version }}-linux_${{ matrix.arch }}"
+          tar -C /tmp -xzf "dist/packages/${NAME}.tar.gz"
+          # No LD_LIBRARY_PATH: libduckdb.so must resolve through the binary's own directory.
+          env -u LD_LIBRARY_PATH "/tmp/${NAME}/fractalsql-ext-mcp" --version
+          env -u LD_LIBRARY_PATH "/tmp/${NAME}/fractalsql-ext-mcp" --list-tools | head -5
+          test "$(env -u LD_LIBRARY_PATH "/tmp/${NAME}/fractalsql-ext-mcp" --list-tools | wc -l)" -ge 81
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: fractalsql-ext-mcp-${{ matrix.duckdb_version }}-linux_${{ matrix.arch }}
+          path: dist/packages/*
+          if-no-files-found: error
+
+  mcp-windows:
+    name: mcp windows_amd64 @ ${{ matrix.duckdb_version }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb_version: [v1.4.5, v1.5.6, v2.0.0]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install OpenSSL (vcpkg, static triplet)
+        shell: cmd
+        run: |
+          rem mcp\scripts\windows\build.bat finds the OpenSSL tree through %VCPKG_ROOT%
+          echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%>>%GITHUB_ENV%
+          "%VCPKG_INSTALLATION_ROOT%\vcpkg" install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
+      - name: Fetch libduckdb
+        shell: pwsh
+        env:
+          DUCKDB_VERSION: ${{ matrix.duckdb_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path libduckdb | Out-Null
+          # DuckDB 2.0.0 renamed its release assets (zip -> tar.gz)
+          if ([int]($env:DUCKDB_VERSION.TrimStart('v').Split('.')[0]) -ge 2) {
+            Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/duckdb/duckdb/releases/download/$env:DUCKDB_VERSION/duckdb-shared-libs-windows-amd64.tar.gz" -OutFile libduckdb.tar.gz
+            tar -xzf libduckdb.tar.gz -C libduckdb
+          } else {
+            Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/duckdb/duckdb/releases/download/$env:DUCKDB_VERSION/libduckdb-windows-amd64.zip" -OutFile libduckdb.zip
+            Expand-Archive -Path libduckdb.zip -DestinationPath libduckdb -Force
+          }
+          Get-ChildItem libduckdb
+
+      - name: Build fractalsql-ext-mcp.exe
+        shell: cmd
+        run: |
+          call mcp\scripts\windows\build.bat "%CD%\mcp-out" "%CD%\libduckdb"
+          if errorlevel 1 exit /b 1
+
+      - name: Package .zip
+        shell: pwsh
+        env:
+          DUCKDB_VERSION: ${{ matrix.duckdb_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $NAME = "fractalsql-ext-mcp-$env:DUCKDB_VERSION-windows_amd64"
+          $STAGE = New-Item -ItemType Directory -Path "stage/$NAME" -Force
+          Copy-Item mcp-out/fractalsql-ext-mcp.exe "$STAGE/"
+          Copy-Item mcp-out/duckdb.dll                 "$STAGE/"
+          Copy-Item mcp/README.md, mcp/manifest.json, mcp/.mcp-schema-lock, mcp/.mcp-safety-annotations-lock $STAGE
+          Copy-Item LICENSE "$STAGE/LICENSE"
+          Copy-Item THIRD-PARTY-NOTICES.md "$STAGE/LICENSE-THIRD-PARTY"
+          & "$STAGE/fractalsql-ext-mcp.exe" --version
+          New-Item -ItemType Directory -Force -Path dist/packages | Out-Null
+          Compress-Archive -Path "$STAGE" -DestinationPath "dist/packages/$NAME.zip" -Force
+          Get-ChildItem dist/packages
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: fractalsql-ext-mcp-${{ matrix.duckdb_version }}-windows_amd64
+          path: dist/packages/*
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------
+  # The MCP server on macOS: one cell per architecture, built natively. libduckdb.dylib rides beside the binary
+  # (@loader_path) with the two lock files, which is where the server looks for them.
+  # --------------------------------------------------------------------
+  mcp-macos:
+    name: mcp ${{ matrix.platform_tag }} @ ${{ matrix.duckdb_version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb_version: [v1.4.5, v1.5.6, v2.0.0]
+        platform_tag: [osx_amd64, osx_arm64]
+        include:
+          - platform_tag: osx_amd64
+            runner: macos-15-intel
+          - platform_tag: osx_arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Build and package fractalsql-ext-mcp
+        env:
+          DV: ${{ matrix.duckdb_version }}
+        run: |
+          set -euo pipefail
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          SSL="$(brew --prefix openssl@3)"
+          mkdir -p libduckdb
+          bash scripts/fetch_duckdb.sh libs "${DV}" osx universal libduckdb
+          test -f libduckdb/libduckdb.dylib
+          # -mmacosx-version-min=13.3: Apple's libc++ marks std::to_chars on a double unavailable before that.
+          # OpenSSL is linked DYNAMICALLY against Homebrew's openssl@3 (its keg-only prefix goes in through CPPEXTRA and
+          # LDEXTRA): Homebrew patches it, and nothing of OpenSSL is shipped in the archive. The user needs openssl@3
+          # installed. libduckdb.dylib rides beside the binary.
+          make -C mcp CXXFLAGS="-O2 -mmacosx-version-min=13.3" CPPEXTRA="-I${SSL}/include" LDEXTRA="-L${SSL}/lib" \
+              DUCKDB_DIR="$PWD/libduckdb" RPATH='@loader_path' BUILD="$PWD/obj" OUT="$PWD/fractalsql-ext-mcp"
+          # It must link OpenSSL as a shared library (not fold the static .a in), and must need nothing else outside the
+          # system besides libduckdb.
+          LIBS="$(otool -L fractalsql-ext-mcp | tail -n +2 | awk '{print $1}')"
+          echo "${LIBS}"
+          echo "${LIBS}" | grep -q 'openssl@3/lib/libssl' || { echo "FAIL: libssl is not linked dynamically" >&2; exit 1; }
+          if echo "${LIBS}" | grep -v -E '^(/usr/lib/|/System/Library/|@rpath/libduckdb|@loader_path/libduckdb|.*/opt/openssl@3/lib/lib(ssl|crypto))' | grep -q .; then
+              echo "FAIL: the binary depends on a library other than libduckdb, openssl@3 and the system's own" >&2; exit 1
+          fi
+          NAME="fractalsql-ext-mcp-${DV}-${{ matrix.platform_tag }}"
+          STAGE="stage/${NAME}"
+          mkdir -p "${STAGE}" dist/packages
+          install -m 0755 fractalsql-ext-mcp "${STAGE}/"
+          install -m 0755 libduckdb/libduckdb.dylib "${STAGE}/"
+          install -m 0644 mcp/README.md mcp/manifest.json mcp/.mcp-schema-lock mcp/.mcp-safety-annotations-lock "${STAGE}/"
+          install -m 0644 LICENSE "${STAGE}/LICENSE"
+          install -m 0644 THIRD-PARTY-NOTICES.md "${STAGE}/LICENSE-THIRD-PARTY"
+          "${STAGE}/fractalsql-ext-mcp" --version
+          tar -C stage -czf "dist/packages/${NAME}.tar.gz" "${NAME}"
+          ( cd dist/packages && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256" )
+          ls -l dist/packages
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: fractalsql-ext-mcp-${{ matrix.duckdb_version }}-${{ matrix.platform_tag }}
+          path: dist/packages/*
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------
+  # easy_install scripts: one copy per release, not per matrix cell.
+  # The scripts pick the release tag at run time, so no stamping here.
+  # --------------------------------------------------------------------
+  easy-install:
+    name: Publish easy_install scripts
+    needs: [linux, macos, windows]
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      # The scripts are arch-independent, so they are stamped once here (not per matrix cell: the same file
+      # uploaded from every cell would race concurrent release-asset uploads of one name).
+      - name: Stamp version into the easy_install scripts
+        run: |
+          set -euo pipefail
+          FSQL_VERSION="${{ github.ref_name }}"
+          FSQL_VERSION="${FSQL_VERSION#v}"
+          mkdir -p dist/packages
+          sed "s/@@FSQL_VERSION@@/${FSQL_VERSION}/" scripts/easy_install.sh > dist/packages/easy_install.sh
+          sed "s/@@FSQL_VERSION@@/${FSQL_VERSION}/" scripts/windows/easy_install.ps1 > dist/packages/easy_install.ps1
+          chmod +x dist/packages/easy_install.sh
+          grep -q "^FSQL_VERSION=\"${FSQL_VERSION}\"" dist/packages/easy_install.sh
+          grep -q "FsqlVersion = '${FSQL_VERSION}'" dist/packages/easy_install.ps1
+          ls -l dist/packages
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          files: |
+            dist/packages/easy_install.sh
+            dist/packages/easy_install.ps1
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # --------------------------------------------------------------------
+  # The release bundles: ONE archive per (DuckDB version, platform), assembled from the extension build and the
+  # MCP build of the same cell. It holds the extension, the reasoning plugin with its detached signature, the MCP
+  # server with the DuckDB library it runs on, and the licence notices (including DuckDB's own, because the MCP
+  # server ships DuckDB's shared library). Nothing else is attached to the release except SHA256SUMS and the
+  # easy_install scripts. Each bundle has a unique name, so concurrent cells never touch the same asset.
+  # --------------------------------------------------------------------
+  bundle:
+    name: bundle ${{ matrix.platform_tag }} @ ${{ matrix.duckdb_version }}
+    needs: [linux, macos, windows, mcp-linux, mcp-windows, mcp-macos]
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb_version: [v1.4.5, v1.5.6, v2.0.0]
+        platform_tag: [linux_amd64, linux_arm64, osx_amd64, osx_arm64, windows_amd64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Download the extension build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: fractalsql-ext-${{ matrix.duckdb_version }}-${{ matrix.platform_tag }}
+          path: in/ext
+
+      - name: Download the MCP build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: fractalsql-ext-mcp-${{ matrix.duckdb_version }}-${{ matrix.platform_tag }}
+          path: in/mcp
+
+      - name: Assemble the bundle
+        env:
+          DV: ${{ matrix.duckdb_version }}
+          PT: ${{ matrix.platform_tag }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          NAME="fractalsql-ext-${DV}-${PT}"
+          VERSION="${TAG#v}"
+          ROOT="stage/${NAME}"
+          mkdir -p "${ROOT}" in/x dist/packages
+
+          # The extension archive: the extension, the plugin and its .sig, LICENSE, load_extension.sql, README.txt.
+          unzip -q "in/ext/${NAME}.zip" -d "${ROOT}"
+
+          # The MCP archive goes under mcp/. Its own LICENSE copies are dropped: the bundle has one set, at the root.
+          case "${PT}" in
+            windows_*) unzip -q "in/mcp/fractalsql-ext-mcp-${DV}-${PT}.zip" -d in/x ;;
+            *)         tar -xzf "in/mcp/fractalsql-ext-mcp-${DV}-${PT}.tar.gz" -C in/x ;;
+          esac
+          MCP_SRC="$(find in/x -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+          test -n "${MCP_SRC}"
+          mkdir -p "${ROOT}/mcp"
+          cp -a "${MCP_SRC}/." "${ROOT}/mcp/"
+          rm -f "${ROOT}/mcp/LICENSE" "${ROOT}/mcp/LICENSE-THIRD-PARTY"
+
+          # mcp/RUN.txt: how to start the server. The Linux archive carries its own; write the macOS and Windows ones here.
+          EXT="fractalsql.${DV}.${PT}.duckdb_extension"
+          case "${PT}" in
+            osx_*)
+              cat > "${ROOT}/mcp/RUN.txt" <<TXT
+          fractalsql-ext-mcp ${VERSION} (built against DuckDB ${DV}, ${PT})
+
+            xattr -d com.apple.quarantine fractalsql-ext-mcp libduckdb.dylib      # once; the files are unsigned
+            FSQL_DUCKDB_EXTENSION=/path/to/${EXT} \\
+            FSQL_DUCKDB_ALLOW_UNSIGNED=true ./fractalsql-ext-mcp
+
+          Needs Homebrew's OpenSSL (brew install openssl@3); the server links it dynamically. Use the extension built for the
+          same DuckDB version (${DV}).
+          TXT
+              ;;
+            windows_*)
+              cat > "${ROOT}/mcp/RUN.txt" <<TXT
+          fractalsql-ext-mcp ${VERSION} (built against DuckDB ${DV}, ${PT})
+
+            \$env:FSQL_DUCKDB_EXTENSION = 'C:\\path\\to\\${EXT}'
+            \$env:FSQL_DUCKDB_ALLOW_UNSIGNED = 'true'
+            .\\fractalsql-ext-mcp.exe
+
+          OpenSSL is linked statically and duckdb.dll sits beside the executable. Use the extension built for the same DuckDB
+          version (${DV}).
+          TXT
+              ;;
+          esac
+
+          # DuckDB's licence for this tag, verbatim, plus the licences of the third-party code DuckDB itself
+          # carries. The MCP server ships DuckDB's shared library, so the MIT notice (and those of its
+          # components) must travel with the bundle.
+          mkdir -p "${ROOT}/licenses/duckdb" duckdb-src
+          curl -fsSL --proto '=https' --retry 3 "https://github.com/duckdb/duckdb/archive/refs/tags/${DV}.tar.gz" -o duckdb-src.tar.gz
+          # A pattern that matches nothing makes tar exit non-zero, so the result is checked explicitly below.
+          tar -xzf duckdb-src.tar.gz -C "${ROOT}/licenses/duckdb" --strip-components=1 --wildcards \
+              '*/LICENSE' '*/third_party/*LICENSE*' '*/third_party/*LICENCE*' '*/third_party/*COPYING*' '*/third_party/*NOTICE*' || true
+          test -s "${ROOT}/licenses/duckdb/LICENSE" || { echo "FAIL: DuckDB ${DV} LICENSE not captured" >&2; exit 1; }
+          N="$(find "${ROOT}/licenses/duckdb/third_party" -type f 2>/dev/null | wc -l)"
+          echo "DuckDB third-party licence files: ${N}"
+          test "${N}" -gt 0 || { echo "FAIL: no DuckDB third-party licence files captured for ${DV}" >&2; exit 1; }
+
+          # The notice is rendered for this cell, reading the DuckDB copyright line from the licence just captured.
+          bash scripts/render_notices.sh THIRD-PARTY-NOTICES.md "${ROOT}/LICENSE-THIRD-PARTY" \
+              "${VERSION}" "${DV}" "${PT}" "${ROOT}/licenses/duckdb/LICENSE"
+
+          cat >> "${ROOT}/README.txt" <<EOF
+
+          ---------------------------------------------------------------------
+          This bundle (${NAME})
+
+            fractalsql.${DV}.${PT}.duckdb_extension   the extension (load it into your own DuckDB ${DV})
+            fractalsql-reasoning-http.*  (+ .sig)     the optional reasoning plugin and its signature
+            mcp/                                      the MCP server, with the DuckDB ${DV} shared library it runs on,
+                                                      its lock files and manifest (see mcp/RUN.txt and mcp/README.md)
+            licenses/duckdb/                          DuckDB's licence for ${DV} and its third-party licences
+            LICENSE, LICENSE-THIRD-PARTY              this project's licence and the third-party notices
+
+          The extension needs a DuckDB ${DV} you already have; the DuckDB library under mcp/ is for the MCP
+          server only. The MCP server can load the extension from the bundle root: point FSQL_DUCKDB_EXTENSION at it.
+          EOF
+          case "${PT}" in
+            osx_*)
+              cat >> "${ROOT}/README.txt" <<'EOF'
+
+          macOS: the MCP server uses Homebrew's openssl@3 (brew install openssl@3). The extension does not need it.
+          EOF
+              ;;
+            windows_*)
+              cat >> "${ROOT}/README.txt" <<'EOF'
+
+          Windows: the reasoning plugin (fractalsql-reasoning-http.dll) needs the Microsoft Visual C++ 2015-2022
+          Redistributable (x64), which provides VCRUNTIME140.dll. Install it from
+          https://aka.ms/vs/17/release/vc_redist.x64.exe if the plugin does not load. The extension and the MCP
+          server do not need it.
+          EOF
+              ;;
+          esac
+
+          # Pack. Linux and macOS: tar.gz. Windows: zip.
+          case "${PT}" in
+            windows_*) (cd stage && zip -q -9 -r "../dist/packages/${NAME}.zip" "${NAME}") ;;
+            *)         tar -C stage -czf "dist/packages/${NAME}.tar.gz" "${NAME}" ;;
+          esac
+          ls -l dist/packages
+
+      - name: Check the bundle contents
+        env:
+          DV: ${{ matrix.duckdb_version }}
+          PT: ${{ matrix.platform_tag }}
+        run: |
+          set -euo pipefail
+          NAME="fractalsql-ext-${DV}-${PT}"
+          mkdir -p chk
+          case "${PT}" in
+            windows_*) unzip -q "dist/packages/${NAME}.zip" -d chk; PLUGIN=fractalsql-reasoning-http.dll; SRV=fractalsql-ext-mcp.exe; LIB=duckdb.dll ;;
+            osx_*)     tar -xzf "dist/packages/${NAME}.tar.gz" -C chk; PLUGIN=fractalsql-reasoning-http.so; SRV=fractalsql-ext-mcp; LIB=libduckdb.dylib ;;
+            *)         tar -xzf "dist/packages/${NAME}.tar.gz" -C chk; PLUGIN=fractalsql-reasoning-http.so; SRV=fractalsql-ext-mcp; LIB=libduckdb.so ;;
+          esac
+          B="chk/${NAME}"
+          for f in "fractalsql.${DV}.${PT}.duckdb_extension" "${PLUGIN}" "${PLUGIN}.sig" LICENSE LICENSE-THIRD-PARTY README.txt load_extension.sql \
+                   "mcp/${SRV}" "mcp/${LIB}" mcp/RUN.txt mcp/manifest.json mcp/.mcp-schema-lock mcp/.mcp-safety-annotations-lock \
+                   licenses/duckdb/LICENSE; do
+            test -f "${B}/${f}" || { echo "FAIL: ${f} is missing from the bundle" >&2; exit 1; }
+          done
+          grep -q 'Stichting DuckDB Foundation' "${B}/LICENSE-THIRD-PARTY"
+          test "$(wc -c < "${B}/${PLUGIN}.sig")" -eq 64
+          # linux_amd64 runs natively here: the server must start from the unpacked bundle with no library path.
+          if [ "${PT}" = linux_amd64 ]; then
+            env -u LD_LIBRARY_PATH "${B}/mcp/${SRV}" --version
+            test "$(env -u LD_LIBRARY_PATH "${B}/mcp/${SRV}" --list-tools | wc -l)" -ge 81
+          fi
+          echo "ok: ${NAME}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: bundle-${{ matrix.duckdb_version }}-${{ matrix.platform_tag }}
           path: dist/packages/*
           if-no-files-found: error
 
       - name: Upload to Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: dist/packages/*
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # --------------------------------------------------------------------
+  # Publishes SHA256SUMS for every asset on the release (the bundles and the easy_install scripts).
+  # scripts/easy_install.sh and easy_install.ps1 verify a downloaded bundle against it. Runs after every other
+  # job has uploaded, and only for a tag.
+  # --------------------------------------------------------------------
+  checksums:
+    needs: [bundle, easy-install]
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Compute and upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir assets && cd assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*' --skip-existing
+          # SHA256SUMS is derived: never checksum a previous copy of it.
+          rm -f SHA256SUMS
+          sha256sum -- * | sort -k2 > ../SHA256SUMS
+          cd ..
+          cat SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber

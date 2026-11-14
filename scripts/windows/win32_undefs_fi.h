@@ -1,7 +1,7 @@
 /* scripts/windows/win32_undefs_fi.h
  *
  * Force-included (via MSVC /FI) at the TOP of every TU compiled
- * during the duckdb-fractalsql Windows build. Fixes the same
+ * during the fractalsql-ext Windows build. Fixes the same
  * CreateDirectory / MoveFile / min / max macro collision that
  * DuckDB's own duckdb/common/windows_undefs.hpp targets.
  *
@@ -41,24 +41,39 @@
 
 #include <windows.h>
 
+/* <windows.h> reaches <winioctl.h> only through the non-lean include
+ * chain (winscard.h -> winioctl.h), and WIN32_LEAN_AND_MEAN above cuts
+ * that chain. DuckDB v2.0.0's src/common/local_file_system.cpp uses
+ * the FSCTL_SET_SPARSE / FSCTL_SET_ZERO_DATA control codes, so the
+ * lean-and-mean build loses them and fails with "error C2065:
+ * 'FSCTL_SET_SPARSE': undeclared identifier". Include <winioctl.h>
+ * explicitly to restore them.
+ *
+ * Only those two control-code names from this header appear anywhere
+ * in the DuckDB sources, and none of its macro names collide with a
+ * C++ identifier in the DuckDB or FractalSQL sources -- so pulling it
+ * into every translation unit is safe.
+ */
+#include <winioctl.h>
+
 /* Collisions with DuckDB identifiers. Each macro is something
  * windows.h defines that also appears as a C++ identifier in the
  * DuckDB source we're compiling:
  *
  *   CreateDirectory / MoveFile / RemoveDirectory / CopyFile
- *       — fileapi.h A/W suffix macros; collide with duckdb::
+ *       -- fileapi.h A/W suffix macros; collide with duckdb::
  *         FileSystem method calls (extension_install.cpp).
  *   min / max
- *       — windef.h arithmetic macros; collide with
+ *       -- windef.h arithmetic macros; collide with
  *         std::numeric_limits<T>::min/max.
  *   ERROR / small
- *       — wingdi.h / rpcndr.h macros; collide with enum values.
+ *       -- wingdi.h / rpcndr.h macros; collide with enum values.
  *   STRICT
- *       — windef.h flag macro (empty when enabled). Collides with
+ *       -- windef.h flag macro (empty when enabled). Collides with
  *         enum values like DecodeErrorBehavior::STRICT in v1.5's
  *         core_functions/scalar/blob/encode.cpp.
  *   IGNORE
- *       — winuser.h MessageBox return value (expands to 5). Collides
+ *       -- winuser.h MessageBox return value (expands to 5). Collides
  *         with DecodeErrorBehavior::IGNORE added in v1.5.2's
  *         core_functions/scalar/blob/encode.cpp. MSVC reports the
  *         resulting `Enum::5` as "illegal token 'constant' on right
@@ -68,7 +83,7 @@
  * identifiers:
  *
  *   VOID / CONST / INTERFACE / IN / OUT / OPTIONAL
- *       — the Windows SDK ITSELF uses these in header declarations
+ *       -- the Windows SDK ITSELF uses these in header declarations
  *         (e.g. `VOID __cdecl BCryptFree(...)` in bcrypt.h). If we
  *         undef them at the top of the TU, any subsequent transitive
  *         include of a Windows SDK header that hasn't been pulled

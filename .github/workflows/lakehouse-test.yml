@@ -1,0 +1,81 @@
+name: Lakehouse test (Iceberg and DuckLake)
+
+# Separate from install-test.yml so a PyPI or extension-repo hiccup here
+# does not block the core install checks. Builds the extension, writes the
+# Iceberg and DuckLake demo tables, and runs sections 0 to 3 of each demo.
+# Section 4 of each demo needs a reasoning endpoint and is not run.
+
+on:
+  push:
+    branches: [main, '2.x']
+  pull_request:
+    branches: [main, '2.x']
+  workflow_dispatch: {}
+  schedule:
+    - cron: '37 4 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lakehouse:
+    name: Iceberg + DuckLake demos (linux_amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build fractalsql.duckdb_extension
+        run: |
+          chmod +x build.sh
+          ./build.sh amd64
+
+      - name: Install matching DuckDB CLI
+        run: |
+          set -euo pipefail
+          EXT="dist/amd64/fractalsql.v1.5.6.linux_amd64.duckdb_extension"
+          VER="$(basename "$EXT" | sed -E 's/^fractalsql\.(v[0-9.]+)\.linux_amd64.*$/\1/')"
+          echo "DUCKDB_VERSION=$VER" >> "$GITHUB_ENV"
+          bash scripts/fetch_duckdb.sh cli "${VER}" linux amd64 /tmp
+          /tmp/duckdb --version
+
+      - name: Iceberg demo (co-load, scan, cast, cosine search)
+        run: |
+          set -euo pipefail
+          EXT_ABS="$(readlink -f dist/amd64/fractalsql.v1.5.6.linux_amd64.duckdb_extension)"
+          LAKE="$RUNNER_TEMP/lake-iceberg"
+          mkdir -p "$LAKE"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q pyiceberg pyarrow sqlalchemy
+          LAKE_DIR="$LAKE" "$RUNNER_TEMP/venv/bin/python" demo/lakehouse/make_iceberg_fixture.py
+
+          # the demo reads its lake directory from LAKE_DIR (default /lake)
+          sed '/=== 4\./,$d' demo/demo-lakehouse-iceberg.sql > "$RUNNER_TEMP/iceberg.sql"
+          { echo "LOAD '$EXT_ABS';"; cat "$RUNNER_TEMP/iceberg.sql"; } \
+            | LAKE_DIR="$LAKE" /tmp/duckdb -unsigned -bail > /tmp/iceberg.out
+
+          grep -q "Community" /tmp/iceberg.out || { echo "FAIL: edition != Community"; exit 1; }
+          grep -qi "double\[\]" /tmp/iceberg.out || { echo "FAIL: iceberg column not DOUBLE[]"; exit 1; }
+          grep -q "login" /tmp/iceberg.out || { echo "FAIL: no login-cluster neighbours"; exit 1; }
+          echo "ok: iceberg demo sections 0-3"
+
+      - name: DuckLake demo (co-load, attach, cast, cosine search)
+        run: |
+          set -euo pipefail
+          EXT_ABS="$(readlink -f dist/amd64/fractalsql.v1.5.6.linux_amd64.duckdb_extension)"
+          LAKE="$RUNNER_TEMP/lake-ducklake"
+          mkdir -p "$LAKE/ducklake/data"
+          LAKE_DIR="$LAKE" /tmp/duckdb -unsigned -bail < demo/lakehouse/make_ducklake_fixture.sql > /tmp/ducklake_fixture.out
+
+          sed '/=== 4\./,$d' demo/demo-lakehouse-ducklake.sql > "$RUNNER_TEMP/ducklake.sql"
+          { echo "LOAD '$EXT_ABS';"; cat "$RUNNER_TEMP/ducklake.sql"; } \
+            | LAKE_DIR="$LAKE" /tmp/duckdb -unsigned -bail > /tmp/ducklake.out
+
+          grep -q "Community" /tmp/ducklake.out || { echo "FAIL: edition != Community"; exit 1; }
+          grep -qi "double\[\]" /tmp/ducklake.out || { echo "FAIL: ducklake column not DOUBLE[]"; exit 1; }
+          grep -q "login" /tmp/ducklake.out || { echo "FAIL: no login-cluster neighbours"; exit 1; }
+          echo "ok: ducklake demo sections 0-3"

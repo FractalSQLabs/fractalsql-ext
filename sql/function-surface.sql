@@ -1,0 +1,222 @@
+-- sql/function-surface.sql
+--
+-- fractalsql-ext v2.0 -- load instructions and function surface
+-- reference.
+--
+-- DuckDB extensions register their functions from C++ at LOAD time
+-- (no CREATE FUNCTION ... SONAME equivalent), so there are no DDL
+-- statements to replay. Everything below is either a load command or
+-- plain SQL the user runs to try the surface.
+--
+-- ---------------------------------------------------------------------
+-- 1. Loading
+-- ---------------------------------------------------------------------
+--
+-- CLI:  { echo "LOAD '/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension';"; cat ...; } | duckdb -bail -unsigned
+-- SQL:  LOAD '/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension';
+-- See sql/load_extension.sql for the full sequence.
+--
+-- ---------------------------------------------------------------------
+-- 2. Function surface (2.0.0, Community sovereign build)
+-- ---------------------------------------------------------------------
+--
+-- Smoke + search:
+--   fractal_edition() -> VARCHAR                        -- 'Community'
+--   fractal_version() -> VARCHAR                        -- '2.0.0'
+--   fractal_search(vector, query) -> DOUBLE                -- Sniper, memoized
+--     (raw-SFS best-point mode overloads:
+--      fractal_search(query[, iterations, population_size,
+--      diffusion_factor]) -> LIST(DOUBLE))
+--   fractal_search_debug(vector, iterations, population_size, diffusion_factor)
+--                                    -> VARCHAR  -- 4 positional args, no SQL defaults
+--
+-- Scout (aggregate + table-function entry points, same options):
+--   fractal_search_explore(column, query[, options])              -> LIST(LIST(DOUBLE))
+--   fractal_search_explore(table, column, query[, options]) (table function)
+--
+-- Vectors are plain LIST values in this build (no custom SQL type):
+--   fractal_vector_from_float8_array(double[])             -> LIST(FLOAT)
+--   fractal_vector_to_float8_array(v)                      -> DOUBLE[]
+--   fractal_vector_dims(v)                                 -> INT
+--   fractal_vector_dot(a,b) / _l2_sq(a,b) / _l2(a,b)       -> DOUBLE
+--   fractal_vector_cosine_distance(a,b)                    -> DOUBLE
+--   fractal_vector_cosine_similarity(a,b)                  -> DOUBLE
+--   fractal_vector_add(a,b) / _sub(a,b)                    -> LIST(FLOAT)
+--   fractal_vector_scale(v,s) / _normalize(v)              -> LIST(FLOAT)
+--   fractal_vector_weighted_concat(a,b,s)                  -> LIST(FLOAT)
+--   fractal_vector_norm(v)                                 -> DOUBLE
+--   fractal_vector_lp_distance(a,b,p)                      -> DOUBLE
+--   fractal_vector_quantize_int8(v)                        -> JSON TEXT
+--   fractal_vector_quantize_binary(v)                      -> BLOB
+--   fractal_vector_hamming_distance(a,b)                   -> INT
+--
+-- Configuration: the extension's own configuration is environment
+-- variables read by the host process (FSQL_REASONING_HTTP_*,
+-- FRACTALSQL_TEXT_TO_SQL_ALLOWED_STATEMENTS, FRACTALSQL_ENTERPRISE_LIB);
+-- see docs/reasoning-setup.md. Two functions are the named way to read
+-- and change that configuration from SQL:
+--   fractal_config_get(key)                                   -> VARCHAR
+--   fractal_config_set(key, value)                            -> BOOLEAN
+--     (the keys: reasoning_plugin, http_url, http_model,
+--      http_embed_url, http_embed_model, http_think,
+--      http_think_provider, http_native_url, http_num_ctx,
+--      http_response_mode, http_token, enterprise_lib. An empty value
+--      unsets; http_token can be set but is never read back.)
+--
+-- Sovereign surface (reasoning plugin required; clean precondition
+-- errors without one):
+--   fractal_reason(text[, prompt])                         -> VARCHAR
+--   fractal_schema_context([tables[, format]])             -> VARCHAR
+--   fractal_text_to_sql(question[, tables])                -> VARCHAR
+--     (allowlist + parse-check only, never executes; see
+--      docs/text-to-sql-setup.md)
+--   fractal_embed(text)                                    -> LIST(DOUBLE)
+--
+-- Vectorizer (persistent per-DB tables fractal_vectorizers +
+-- fractal_vectorizer_queue; unlike the reference build's TEMP
+-- triggers, they are visible to every connection on the database):
+--   fractal_vectorizer_create(source_table, text_col, embedding_col)
+--   fractal_vectorizer_create(source_table, pk, text_col, embedding_col)
+--   fractal_vectorizer_create(source_table, pk, text_col, embedding_col,
+--     options)                                              -> BIGINT
+--   fractal_vectorizer_pause(id) / _resume(id) / _drop(id) -> TEXT
+--   fractal_vectorizer_process_queue([batch[, stale_after_secs]]) -> BIGINT
+--     (returns the rows this pass took to an end -- a row that FAILED
+--      to embed counts too; failures keep status 'failed' with the
+--      error; stale 'processing' rows older than stale_after_secs are
+--      reclaimed to 'pending')
+--   fractal_vectorizer_status() table function             -- per-vectorizer counters
+--
+--   Identifiers: every dot-separated segment of a table or column
+--   name matches [A-Za-z_][A-Za-z0-9_]* (63 characters per segment,
+--   256 per name). A source_table may be schema-qualified -- "main.tbl"
+--   is two segments, quoted as "main"."tbl" -- while a column name may
+--   not contain a dot. Anything else is refused with "fractalsql:
+--   invalid identifier".
+--
+--   Options: the options argument is a JSON object, and it is PARSED
+--   rather than just stored:
+--     max_embeds_per_window  rows one window may embed (absent or <= 0
+--                            means uncapped)
+--     window_secs            the window's length in seconds (3600)
+--   Any other key is refused rather than quietly ignored.
+--
+--   Bounds: process_queue's batch is 1..100000, and stale_after_secs
+--   must be positive.
+--
+-- Agent entry points (table functions returning result sets):
+--   fractal_search_agent(table_name, vector_col, query, pop_size,
+--     iterations)
+--   fractal_sql_agent(question, tables, max_retries, auto_execute)
+--   fractal_agent_plan_explore(initial_state, table, col, max_branches)
+--   fractal_agent_trajectory_predict(table, col, baseline_id,
+--     forecast_steps)
+--   fractal_rag_agent(query, table_name, vector_col, meta_filter)
+--   fractal_search_telemetry(table, col, query, k)
+--   fractal_search_trajectory(table, col, baseline, current, k)
+--   fractal_cross_modal_search(tbl, col, morph, clinic, alpha, k)
+--   fractal_hybrid_clinical_search(tbl, col, query, cohort, k)
+--   fractal_agent_detect_loop(agent_id, state_log, dim[, n_bits,
+--     seed, hamming_threshold])
+--     (SimHash state fingerprints + Brent's cycle detector, with a
+--      DFA drift check over the per-state L2-norm trajectory; 64-bit
+--      fingerprints by default -- 6-arity calls set n_bits/seed/
+--      threshold)
+--   fractal_text_to_sql validation pipeline shared with
+--     fractal_sql_agent's bind: allowlist (select-only unless
+--     FRACTALSQL_TEXT_TO_SQL_ALLOWED_STATEMENTS is widened), a real
+--     parse-check, EXPLAIN, then execution by fractal_sql_agent only.
+--
+-- Sixteen recipe agents (fractal_agent_*), each returning one JSON
+-- document: allocate, anomaly_triage, data_analyst, detour_classify,
+-- diverse_portfolios (enterprise tier), feedback_audit,
+-- network_coverage_alert, outlier_intercept, patient_deterioration_triage,
+-- rebalance_sibling, recall_hybrid, recommend_diverse, regime_triage,
+-- route_task, schedule_workload, track_anomaly. Full recipes in
+-- docs/api-agency.md.
+--
+-- Analytics (DFA / box-counting / TDA / portfolio):
+--   fractal_dimension_dfa(series)                          -> DOUBLE
+--   fractal_dimension_drift(series, window)                -> STRUCT(drift, recent_alpha, baseline_alpha)
+--   fractal_dimension_boxcount(points, d)                  -> DOUBLE
+--   fractal_change_point_detect(series, window[, threshold[, max_points]])
+--                                                          -> LIST(BIGINT)
+--   fractal_periodogram(series[, max_peaks]) table function
+--   fractal_tda_persistence_diagram(points, dim, max_dim, max_thresh[, max_h0_bars])
+--     -> STRUCT(h0_bars LIST(STRUCT(birth, death)), betti1 BIGINT)
+--   fractal_state_fingerprint(vec[, n_bits[, seed]])       -> BLOB
+--     (64-bit default = 16-byte blob)
+--   fractal_cycle_detect(fingerprints BLOB[][,
+--     hamming_threshold]) table function
+--   fractal_spectrogram_entropy(series[, window[, hop[, max_frames]]])
+--     -> LIST(DOUBLE) (window default 64, hop 32, max_frames 4096; per-
+--     frame normalized spectral entropy in [0,1], one per time frame)
+--   fractal_optimize_portfolio(mu, cov, k[, seed[, use_obl[,
+--     diffusion_mode]]])                                   -> STRUCT(sharpe, weights)
+--   fractal_optimize_portfolio_multimodal(...[, use_obl[, diffusion_mode]])
+--     (ENTERPRISE tier; returns top n_restarts diverse portfolios)
+--   fractal_optimize_portfolio_multimodal_pareto(...)      (ENTERPRISE tier;
+--     non-dominated front instead of similarity selection)
+--   fractal_optimize_subset(item_values, upper_bounds, k[,
+--     prev_weights, turnover_penalty, seed])               -> STRUCT(score, weights)
+--
+-- Morphology / domain metrics:
+--   fractal_vascular_network(curvature, elevation, length)
+--   fractal_cortical_folding(v, f)
+--   fractal_nerve_plexus_metric(c, e, d)
+--   fractal_morphological_complexity(p, d)
+--
+-- Collapse / diversify / feedback (ledger-state functions):
+--   fractal_detect_collapse()                              -> DOUBLE
+--   fractal_explain_result()                               -> VARCHAR
+--   fractal_diversify_enable()                             -> BOOLEAN
+--   fractal_diversify_disable()                            -> BOOLEAN
+--   fractal_diversify_set_params(...)                      -> TEXT
+--   fractal_feedback_report(handle, kind[, dwell_ms])
+--   fractal_isolate_background(handle)
+--
+-- Ledger / audit (dormant without FSQL_ENTERPRISE_LIB -- the clear
+-- action error returns then; fractal_ledger_verify is NOT gated and
+-- walks the in-memory connection-attached chain):
+--   fractal_ledger_flush / _load / _compact / _reset_soft / _reset_hard
+--   fractal_lock_destructive()                             -> VARCHAR
+--     (one-way latch: returns 'locked', after which flush/compact/
+--      reset_soft/reset_hard refuse on this connection)
+--   fractal_ledger_truth_count / _shadow_count             -> BIGINT
+--   fractal_ledger_verify([kind])                          -> VARCHAR JSON
+--   fractal_audit_unpack(blob)                             -> VARCHAR
+--   fractal_audit_log(entry_type, payload)                 -> VARCHAR
+--
+-- Not implemented in this build: fractal_store_morphology /
+-- fractal_mine_topology_negatives (the named feature store; see
+-- docs/features.md). Non-SQL plumbing with no DuckDB counterpart:
+--   .load / load_extension() -- LOAD replaces it
+--
+-- ---------------------------------------------------------------------
+-- 3. Try it
+-- ---------------------------------------------------------------------
+
+CREATE TABLE vectors (id INTEGER PRIMARY KEY, embedding DOUBLE[]);
+INSERT INTO vectors VALUES (1, [0.6, 0.8, 0.0]),
+                           (2, [0.1, 0.2, -0.3]),
+                           (3, [0.9, 0.1, 0.0]),
+                           (4, [0.5, 0.5, 0.5]);
+
+-- Top 3 nearest to a query (SFS runs once per distinct query per scan):
+SELECT id, fractal_search(embedding, [0.6, 0.8, 0.0]::DOUBLE[]) AS dist
+FROM vectors
+ORDER BY dist
+LIMIT 3;
+
+-- Plain-array vector math -- construct, measure:
+SELECT fractal_vector_dims(fractal_vector_from_float8_array([0.25, 0.75, -0.5])) AS dims,
+       fractal_vector_cosine_similarity(
+           fractal_vector_from_float8_array([0.25, 0.75, -0.5]),
+           fractal_vector_from_float8_array([0.25, 0.75, -0.5]));
+
+-- Scout-mode aggregate over a whole corpus (LIST(LIST(DOUBLE)) result
+-- with the final SFS population):
+-- SELECT UNNEST(fractal_search_explore(embedding, [0.6, 0.8, 0.0]::DOUBLE[])) FROM vectors;
+
+-- Reasoning tier (requires the reasoning plugin + LLM endpoint env):
+-- SELECT fractal_reason('Explain the cosine distance metric.');

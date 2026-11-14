@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.7
+#
+# fractalsql-ext demo runtime -- companion to docker-compose.tmp.yml
+# (a temporary local playground, not wired into CI; delete with the
+# compose file when done).
+#
+# rockylinux:9 matches the modern build profile's glibc 2.34 ceiling, so
+# a modern-profile .duckdb_extension loads cleanly. The image ships the
+# duckdb CLI pinned to the same release the extension was built against,
+# plus the vendored reasoning plugin; the .duckdb_extension itself is
+# mounted read-only at /ext by compose (see the compose file header for
+# usage).
+ARG DUCKDB_VERSION=v1.5.6
+ARG EXT_FILE=fractalsql.v1.5.6.linux_amd64.duckdb_extension
+
+# --------------------------------------------------------------------
+# mcp-builder: the MCP server (fractalsql-ext-mcp). It talks to DuckDB through the C API, so it needs the same
+# release's libduckdb (duckdb.h + libduckdb.so) and OpenSSL headers. Built on rockylinux:9 so the binary runs on the
+# runtime stage below with the same glibc.
+# --------------------------------------------------------------------
+FROM rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6 AS mcp-builder
+ARG DUCKDB_VERSION
+RUN printf 'timeout=180\nretries=15\nfastestmirror=True\n' >> /etc/dnf/dnf.conf && \
+    dnf install -y --setopt=install_weak_deps=False --allowerasing \
+        gcc-c++ make openssl-devel curl unzip ca-certificates && \
+    dnf clean all
+RUN mkdir -p /libduckdb && \
+    curl -fsSL --proto '=https' \
+      "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/libduckdb-linux-amd64.zip" \
+      -o /tmp/libduckdb.zip && \
+    unzip -q /tmp/libduckdb.zip -d /libduckdb && rm /tmp/libduckdb.zip
+WORKDIR /build
+COPY mcp/ /build/mcp/
+RUN make -C mcp CXXFLAGS="-O2" DUCKDB_DIR=/libduckdb BUILD=/build/obj OUT=/build/fractalsql-ext-mcp
+
+FROM rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6 AS runtime
+ARG DUCKDB_VERSION
+ARG EXT_FILE
+
+RUN printf 'timeout=180\nretries=15\nfastestmirror=True\n' >> /etc/dnf/dnf.conf && \
+    dnf install -y --setopt=install_weak_deps=False --allowerasing \
+        curl unzip ca-certificates && \
+    dnf clean all
+
+# duckdb CLI, pinned to the same release the extension cell targets.
+RUN curl -fsSL --proto '=https' \
+      "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip" \
+      -o /tmp/duckdb_cli.zip && \
+    unzip -p /tmp/duckdb_cli.zip duckdb > /usr/local/bin/duckdb && \
+    chmod +x /usr/local/bin/duckdb && \
+    rm /tmp/duckdb_cli.zip && \
+    duckdb --version
+
+# Iceberg, DuckLake and httpfs baked into the image so the container runs offline.
+# The extension home is the image's root home, which the CLI reads at start.
+RUN duckdb -c "INSTALL iceberg; INSTALL ducklake; INSTALL httpfs;"
+
+# The MCP server, so `docker run -i <image> fractalsql-ext-mcp` works out of the box. libduckdb.so rides beside
+# it (same release as the CLI above); the extension is the compose mount at /ext, loaded in-process by the server.
+COPY --from=mcp-builder /build/fractalsql-ext-mcp /usr/local/bin/fractalsql-ext-mcp
+COPY --from=mcp-builder /libduckdb/libduckdb.so /usr/local/lib/libduckdb.so
+RUN echo /usr/local/lib > /etc/ld.so.conf.d/fractalsql-ext.conf && ldconfig
+ENV FSQL_DUCKDB_EXTENSION=/ext/${EXT_FILE} \
+    FSQL_DUCKDB_ALLOW_UNSIGNED=true
+
+# Vendored reasoning plugin (the cognition tier reaches Ollama through
+# it; the path is read once at process start from this env var).
+COPY include/linux-x86_64/fractalsql-reasoning-http.so \
+     /opt/fractalsql/fractalsql-reasoning-http.so
+# Its detached signature must sit beside it: the plugin loads only with the .sig present.
+COPY include/linux-x86_64/fractalsql-reasoning-http.so.sig \
+     /opt/fractalsql/fractalsql-reasoning-http.so.sig
+ENV FRACTALSQL_REASONING_PLUGIN=/opt/fractalsql/fractalsql-reasoning-http.so
+
+# The licence notices the shipped binaries depend on: the extension is
+# statically linked, and the plugin bundles libcurl (and zlib on the
+# Windows build), so the notices travel with the image.
+COPY LICENSE                /licenses/LICENSE
+COPY THIRD-PARTY-NOTICES.md /licenses/LICENSE-THIRD-PARTY
+ENV LICENSE_DIR=/licenses
+
+# Startup LOADs -- /ext is compose's read-only mount of ./tmp-demo-ext.
+# checkpoint_threshold: when the demo is pointed at a database FILE, checkpoint on every commit so the
+# file is complete when the session ends (DuckDB 1.4/1.5 cannot replay the write-ahead log of some
+# schemas the demos create). It does nothing for the default in-memory session.
+RUN printf "LOAD iceberg;\nLOAD ducklake;\nLOAD '/ext/${EXT_FILE}';\nSET checkpoint_threshold='1KB';\n" > /opt/fractalsql/init.sql
+
+WORKDIR /demo
+CMD ["duckdb", "-unsigned", "-init", "/opt/fractalsql/init.sql"]

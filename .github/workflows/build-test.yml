@@ -1,0 +1,598 @@
+name: build-test
+
+# Per-push/PR CI. Two jobs:
+#
+#   gates -- the operator harness. Builds the extension (docker build.sh
+#   on Linux, a native make on macOS, scripts\windows\build.bat on Windows), then wraps
+#   build_test.sh / build_test.ps1. Local == CI: the same scripts
+#   you run by hand run here.
+#
+#   linux -- the version-breadth smoke. release.yml covers the full
+#   (version x arch) tag-triggered matrix; this job keeps a
+#   (duckdb_version x arch) slice on every push so a per-version ABI
+#   regression is caught before merge, with release.yml's proven
+#   probe-by-probe pattern (a crash in one probe doesn't obscure which
+#   statement caused it).
+#
+# Sanitizer jobs (asan/ubsan on Linux and macOS, tsan for the MCP server and
+# coverage on Linux) run weekly, on workflow_dispatch and on every push to 2.x: they run
+# the whole gate suite against an instrumented extension (make SAN=...)
+# hosted by the stock CLI with the sanitizer runtime preloaded. The pure-C
+# extension has no DuckDB source to compile, so the build is seconds; the
+# suite itself is what makes this heavy. Gates 48 and 51 (default set)
+# already run the extension's own sanitizer matrix on every push: ASan and
+# UBSan over the buffer layer and the parity corpus (48), and ASan and
+# ThreadSanitizer over the lifecycle and parallel-call modes (51).
+# There is no Windows sanitizer cell: build_test.ps1 -Asan/-Ubsan need an
+# instrumented DuckDB CLI, and the pure-C build has no DuckDB-from-source
+# path to produce one.
+
+on:
+  push:
+    branches: [main, '2.x']
+  pull_request:
+    branches: [main, '2.x']
+  schedule:
+    # Weekly sanitizer cadence (see the header comment).
+    - cron: '30 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      gate_set:
+        description: 'Gate set: quick | default | fuzz'
+        required: false
+        default: default
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gates:
+    name: ${{ matrix.os }} gate suite
+    if: github.event_name != 'schedule'
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            runner: ubuntu-24.04
+          - os: windows-2022
+            runner: windows-2022
+          # macOS: a native `make` (the extension is pure C, seconds) and the same gate suite, on Apple Silicon and on
+          # Intel (macos-15-intel, GitHub's last Intel image, available until August 2027).
+          - os: macos-15
+            runner: macos-15
+          - os: macos-15-intel
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    # The harness never builds: gate 01 locates the artifact produced by
+    # build.sh (docker) or scripts\windows\build.bat under dist/
+    # (Windows build always targets the pinned DUCKDB_VERSION). Only the
+    # pinned default DuckDB version is exercised here; release.yml's
+    # tag-triggered matrix covers the other versions.
+    env:
+      DUCKDB_VERSION: v1.5.6
+      GATE_SET: ${{ github.event_name == 'workflow_dispatch' && inputs.gate_set || 'default' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------
+      # Linux: docker build.sh + POSIX gate suite.
+      # ------------------------------------------------------------
+      - name: Set up Docker Buildx
+        if: runner.os == 'Linux'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # libssl-dev: the MCP server gates (35-41) build fractalsql-ext-mcp,
+          # which needs the OpenSSL development headers. Without them those gates
+          # skip, so a broken MCP surface would not fail the run.
+          sudo apt-get install -y --no-install-recommends \
+              build-essential python3 python3-pip jq libssl-dev
+
+      - name: Install pip duckdb (best effort, Linux)
+        # The python-driven gates (12 cursor soak, 25 stress driver)
+        # run when a pip `duckdb` matching the built ABI is importable
+        # and skip cleanly when it is not -- so a wheel resolution
+        # failure must not fail the job.
+        if: runner.os == 'Linux'
+        run: python3 -m pip install --break-system-packages "duckdb==1.5.6" || true
+
+      - name: Install duckdb CLI (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' \
+            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-amd64.zip" \
+            -o /tmp/duckdb_cli.zip
+          unzip -p /tmp/duckdb_cli.zip duckdb > /tmp/duckdb
+          chmod +x /tmp/duckdb
+          sudo mv /tmp/duckdb /usr/local/bin/duckdb
+          duckdb --version
+
+      # Gates 46-56 test the extension against every DuckDB line it supports (1.4.x, 1.5.x, 2.0.x). They look for a CLI
+      # (and, on Linux, libduckdb.so for the lifecycle gate) under ~/duckdb-cli/<version>/.
+      - name: Stage the DuckDB CLI and library for every supported line (POSIX)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = macOS ]; then os=osx; arch=universal; else os=linux; arch=amd64; fi
+          for v in v1.4.5 v1.5.6 v2.0.0; do
+            bash scripts/fetch_duckdb.sh cli "$v" "$os" "$arch" "$HOME/duckdb-cli/$v"
+            [ "$RUNNER_OS" = Linux ] && bash scripts/fetch_duckdb.sh libs "$v" "$os" "$arch" "$HOME/duckdb-cli/$v"
+            "$HOME/duckdb-cli/$v/duckdb" --version
+          done
+
+      - name: Build fractalsql.duckdb_extension (Linux)
+        if: runner.os == 'Linux'
+        env:
+          BUILDX_CACHE_ARGS: >-
+            --cache-from=type=gha,scope=fractalsql-ext-build-test-${{ env.DUCKDB_VERSION }}-amd64
+            --cache-to=type=gha,scope=fractalsql-ext-build-test-${{ env.DUCKDB_VERSION }}-amd64,mode=max
+        run: |
+          chmod +x build.sh
+          ./build.sh amd64 2>&1 | tee build-console.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Run gate suite (POSIX)
+        if: runner.os == 'Linux'
+        shell: bash
+        # build_test.sh takes flags, not a positional gate-set name --
+        # `default` means the bare invocation (no --quick/--fuzz).
+        run: |
+          chmod +x build_test.sh
+          case "${GATE_SET}" in
+            quick) ./build_test.sh --quick ;;
+            fuzz)  ./build_test.sh --fuzz ;;
+            *)     ./build_test.sh ;;
+          esac
+
+      # ------------------------------------------------------------
+      # Windows: MSVC + build.bat, then the PowerShell gate suite.
+      # ------------------------------------------------------------
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build fractalsql.duckdb_extension (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmd /c scripts\windows\build.bat 2>&1 | Tee-Object -FilePath build-console.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Cache vcpkg binaries
+        if: runner.os == 'Windows'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+        with:
+          path: C:\vcpkg_cache
+          key: windows-vcpkg-openssl-static-v1
+
+      - name: Install OpenSSL (vcpkg, for the MCP server)
+        if: runner.os == 'Windows'
+        shell: cmd
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,C:\vcpkg_cache,readwrite
+        run: |
+          # The MCP server gates (35-43) build fractalsql-ext-mcp, which links the
+          # vcpkg static OpenSSL. Without it those gates skip, so a green run would
+          # not mean the MCP surface works. mcp\scripts\windows\build.bat finds the
+          # tree through %VCPKG_ROOT%.
+          echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%>>%GITHUB_ENV%
+          "%VCPKG_INSTALLATION_ROOT%\vcpkg" install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+
+      - name: Fetch libduckdb (for the MCP server build)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # The MCP server links libduckdb, and it has to be the release that matches
+          # the extension it loads (DUCKDB_VERSION). The harness takes it from
+          # FSQL_LIBDUCKDB_DIR; without that the MCP gates skip instead of running.
+          $VER = "$env:DUCKDB_VERSION"
+          $dir = Join-Path $env:RUNNER_TEMP "libduckdb"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/duckdb/duckdb/releases/download/$VER/libduckdb-windows-amd64.zip" `
+            -OutFile (Join-Path $dir "libduckdb.zip")
+          Expand-Archive -Path (Join-Path $dir "libduckdb.zip") -DestinationPath $dir -Force
+          Add-Content -Path $env:GITHUB_ENV -Value "FSQL_LIBDUCKDB_DIR=$dir"
+
+      - name: Install duckdb CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $VER = "$env:DUCKDB_VERSION"
+          New-Item -ItemType Directory -Force -Path C:\deps\duckdb | Out-Null
+          # Expand-Archive needs a .zip suffix.
+          Invoke-WebRequest -Uri "https://github.com/duckdb/duckdb/releases/download/$VER/duckdb_cli-windows-amd64.zip" `
+            -OutFile C:\deps\duckdb\duckdb_cli.zip
+          Expand-Archive -Path C:\deps\duckdb\duckdb_cli.zip -DestinationPath C:\deps\duckdb -Force
+          & C:\deps\duckdb\duckdb.exe --version
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\deps\duckdb"
+
+      - name: Run gate suite (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # build_test.ps1 mirrors build_test.sh: -Quick/-Fuzz switches,
+        # no positional gate-set name.
+        run: |
+          switch ($env:GATE_SET) {
+            'quick' { ./build_test.ps1 -Quick }
+            'fuzz'  { ./build_test.ps1 -Fuzz }
+            default { ./build_test.ps1 }
+          }
+          exit $LASTEXITCODE
+
+      # ------------------------------------------------------------
+      # macOS: native make + the POSIX gate suite (build_test.sh).
+      # ------------------------------------------------------------
+      - name: Install toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # GNU `timeout` (coreutils) is not on a macOS runner's PATH; the harness uses it.
+          brew list coreutils >/dev/null 2>&1 || brew install coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+          # openssl@3: the MCP server gates (35-43) build fractalsql-ext-mcp, which needs
+          # the OpenSSL development headers. Homebrew's openssl@3 is keg-only and the
+          # harness resolves it by prefix, so without it those gates skip -- a green run
+          # would say nothing about the MCP surface.
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+
+      - name: Fetch libduckdb (for the MCP server build)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          # The MCP server links libduckdb, and it has to be the release that matches the
+          # extension it loads. The harness takes it from FSQL_LIBDUCKDB_DIR; without that
+          # the MCP gates skip instead of running.
+          dir="${RUNNER_TEMP}/libduckdb"
+          mkdir -p "$dir"
+          curl -fsSL --proto '=https' \
+            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/libduckdb-osx-universal.zip" \
+            -o "$dir/libduckdb.zip"
+          unzip -q "$dir/libduckdb.zip" -d "$dir"
+          echo "FSQL_LIBDUCKDB_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: Install duckdb CLI (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' \
+            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-osx-universal.zip" \
+            -o /tmp/duckdb_cli.zip
+          unzip -p /tmp/duckdb_cli.zip duckdb > /tmp/duckdb
+          chmod +x /tmp/duckdb
+          sudo mv /tmp/duckdb /usr/local/bin/duckdb
+          duckdb --version
+
+      - name: Build fractalsql.duckdb_extension (macOS)
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          make 2>&1 | tee build-console.log
+          ls -l dist/osx_*/
+
+      - name: Run gate suite (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          chmod +x build_test.sh
+          case "${GATE_SET}" in
+            quick) ./build_test.sh --quick ;;
+            fuzz)  ./build_test.sh --fuzz ;;
+            *)     ./build_test.sh ;;
+          esac
+
+      - name: Upload gate build log (failure diagnostics)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          # This harness never builds -- gate 01 only locates the
+          # artifact -- so the log here is the console output of the
+          # build.sh / build.bat steps above, tee'd into the same
+          # build-console.log filename the local builds already use.
+          # The CI step-output printer is grep-filtered and capped, so
+          # a long linker report only reaches CI through this artifact.
+          # if-no-files-found: ignore keeps this a no-op for failures
+          # that never reached a build
+          # (e.g. an already-failed checkout).
+          name: gate-build-log-${{ matrix.os }}
+          path: build-console.log
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------------
+  # Version-breadth smoke: (duckdb_version x arch), release.yml's proven
+  # probe pattern. Kept from the pre-harness job so the per-push gate
+  # still catches a version-specific ABI regression; the same matrix runs
+  # on tag push in release.yml.
+  # --------------------------------------------------------------------
+  linux:
+    name: build+test linux ${{ matrix.arch }} @ ${{ matrix.duckdb_version }}
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        duckdb_version: [v1.4.5, v1.5.6, v2.0.0]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build fractalsql.duckdb_extension
+        env:
+          BUILDX_CACHE_ARGS: >-
+            --cache-from=type=gha,scope=fractalsql-ext-build-test-${{ matrix.arch }}
+            --cache-to=type=gha,scope=fractalsql-ext-build-test-${{ matrix.arch }},mode=max
+        run: |
+          chmod +x build.sh
+          ./build.sh ${{ matrix.arch }}
+
+      # Native amd64 and arm64 runners both run their own CLI directly
+      # -- unlike release.yml's tag-triggered job (which skips smoke on
+      # arm64 to save CI minutes on every release), this per-push gate
+      # runs the full probe sequence on both arches every time.
+      - name: Smoke + Scout test in DuckDB CLI
+        env:
+          DUCKDB_VERSION: ${{ matrix.duckdb_version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+
+          bash scripts/fetch_duckdb.sh cli "${DUCKDB_VERSION}" linux "${ARCH}" /tmp/duckdb-cli
+          ln -sf /tmp/duckdb-cli/duckdb /tmp/duckdb
+          /tmp/duckdb --version
+
+          EXT_PATH="$(pwd)/dist/${ARCH}/fractalsql.${DUCKDB_VERSION}.linux_${ARCH}.duckdb_extension"
+          test -f "${EXT_PATH}"
+
+          probe () {
+              local label="$1"; shift
+              echo "--- probe: ${label} ---"
+              { echo "LOAD '${EXT_PATH}';"; echo "$*"; } \
+                  | /tmp/duckdb -bail -unsigned \
+                  || { echo "!!! probe '${label}' failed"; exit 1; }
+              echo "ok: ${label}"
+          }
+
+          probe "load-only"        "SELECT 1;"
+          probe "edition"          "SELECT fractal_edition();"
+          probe "version"          "SELECT fractal_version();"
+          probe "functions-visible" \
+              "SELECT count(*) FROM duckdb_functions() WHERE function_name LIKE 'fractal%';"
+          probe "fractal-search-scalar" \
+              "SELECT fractal_search([0.6, 0.8]::DOUBLE[], [0.6, 0.8]::DOUBLE[]);"
+          probe "smoke-test"       "$(cat test/smoke_test.sql)"
+          probe "scout-test"       "$(cat test/scout_test.sql)"
+          echo "build-test passed on DuckDB ${DUCKDB_VERSION} / linux_${ARCH}"
+
+  # --------------------------------------------------------------------
+  # Sanitizer cells: build_test.sh --asan/--ubsan on Linux and macOS
+  # (native make SAN=..., no Docker). Weekly and on demand only: the full
+  # gate suite runs against the instrumented extension.
+  # --------------------------------------------------------------------
+  sanitizers-linux:
+    name: build_test.sh --${{ matrix.san }} (linux)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        san: [asan, ubsan]
+    env:
+      DUCKDB_VERSION: v1.5.6
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          # libssl-dev: --asan/--ubsan/--tsan run the MCP server gates (35-40),
+          # which build fractalsql-ext-mcp and need the OpenSSL development
+          # headers. Without them those gates skip, so a broken MCP surface
+          # would not fail the run.
+          sudo apt-get install -y --no-install-recommends \
+              build-essential python3 curl unzip libssl-dev
+
+      # Gates 46-56 test the extension against every DuckDB line it supports (1.4.x, 1.5.x, 2.0.x). They look for a CLI and,
+      # on Linux, libduckdb.so under ~/duckdb-cli/<version>/. Without them those gates fail with "need the 1.5.x CLI".
+      - name: Stage the DuckDB CLI and library for every supported line
+        run: |
+          set -euo pipefail
+          for v in v1.4.5 v1.5.6 v2.0.0; do
+            bash scripts/fetch_duckdb.sh cli "$v" linux amd64 "$HOME/duckdb-cli/$v"
+            bash scripts/fetch_duckdb.sh libs "$v" linux amd64 "$HOME/duckdb-cli/$v"
+            "$HOME/duckdb-cli/$v/duckdb" --version
+          done
+          # build_test.sh outside a sanitizer cell takes `duckdb` from PATH.
+          echo "$HOME/duckdb-cli/${DUCKDB_VERSION}" >> "$GITHUB_PATH"
+
+      - name: build_test.sh --${{ matrix.san }}
+        run: |
+          chmod +x build_test.sh
+          ./build_test.sh --${{ matrix.san }}
+
+  sanitizers-darwin:
+    name: build_test.sh --${{ matrix.san }} (macOS)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
+    runs-on: macos-15
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # ASan is not supported on macOS: it needs the runtime preloaded into the stock (hardened) CLI, which dyld ignores
+        # (build_test.sh skips --asan on macOS). Linux covers ASan.
+        san: [ubsan]
+    env:
+      DUCKDB_VERSION: v1.5.6
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain (macOS)
+        run: |
+          # GNU `timeout` (coreutils) is not on a macOS runner's PATH; the harness uses it, and without it every gate that
+          # wraps a command in `timeout` exits 127 (command not found).
+          brew list coreutils >/dev/null 2>&1 || brew install coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+          # openssl@3: the MCP server gates build fractalsql-ext-mcp, which needs the OpenSSL development headers (keg-only on
+          # Homebrew; the harness resolves it by prefix) and the openssl CLI for the throwaway certificate.
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+
+      - name: Stage the DuckDB CLI for every supported line
+        run: |
+          set -euo pipefail
+          for v in v1.4.5 v1.5.6 v2.0.0; do
+            bash scripts/fetch_duckdb.sh cli "$v" osx universal "$HOME/duckdb-cli/$v"
+            "$HOME/duckdb-cli/$v/duckdb" --version
+          done
+
+      - name: Fetch libduckdb (for the MCP server build)
+        run: |
+          set -euo pipefail
+          # The MCP server links libduckdb, which has to be the release matching the extension. The harness takes it from
+          # FSQL_LIBDUCKDB_DIR; without that the MCP gates skip instead of running.
+          dir="${RUNNER_TEMP}/libduckdb"
+          mkdir -p "$dir"
+          bash scripts/fetch_duckdb.sh libs "${DUCKDB_VERSION}" osx universal "$dir"
+          echo "FSQL_LIBDUCKDB_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: build_test.sh --${{ matrix.san }}
+        run: |
+          chmod +x build_test.sh
+          ./build_test.sh --${{ matrix.san }}
+
+  # --------------------------------------------------------------------
+  # ThreadSanitizer: build_test.sh --tsan builds the MCP server under TSan and runs its gates (35-40). The
+  # extension's own TSan run is gate 51 (its `thread` cell, in the default gate set on every push): the extension
+  # and a test host are built with -fsanitize=thread and loaded into the stock libduckdb. Own job because TSan is
+  # not combinable with ASan (the runtimes cannot link into the same binary).
+  # --------------------------------------------------------------------
+  linux-tsan:
+    name: build_test.sh --tsan (linux)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      DUCKDB_VERSION: v1.5.6
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          # libssl-dev: the MCP server gates build fractalsql-ext-mcp; without the OpenSSL headers they skip and a
+          # data race in the server would not fail the run. util-linux: setarch, which TSan needs on newer kernels.
+          sudo apt-get install -y --no-install-recommends \
+              build-essential python3 curl unzip libssl-dev util-linux
+
+      # Gates 46-56 test the extension against every DuckDB line it supports (1.4.x, 1.5.x, 2.0.x). They look for a CLI and,
+      # on Linux, libduckdb.so under ~/duckdb-cli/<version>/. Without them those gates fail with "need the 1.5.x CLI".
+      - name: Stage the DuckDB CLI and library for every supported line
+        run: |
+          set -euo pipefail
+          for v in v1.4.5 v1.5.6 v2.0.0; do
+            bash scripts/fetch_duckdb.sh cli "$v" linux amd64 "$HOME/duckdb-cli/$v"
+            bash scripts/fetch_duckdb.sh libs "$v" linux amd64 "$HOME/duckdb-cli/$v"
+            "$HOME/duckdb-cli/$v/duckdb" --version
+          done
+          # build_test.sh outside a sanitizer cell takes `duckdb` from PATH.
+          echo "$HOME/duckdb-cli/${DUCKDB_VERSION}" >> "$GITHUB_PATH"
+
+      # build_test.sh outside a sanitizer cell does not build the extension: gate 01 locates the artifact under dist/. The
+      # extension is pure C, so a native `make` is seconds (the main gates job builds it with Docker instead).
+      - name: Build fractalsql.duckdb_extension (native make)
+        run: make
+
+      - name: build_test.sh --tsan
+        run: |
+          chmod +x build_test.sh
+          ./build_test.sh --tsan
+
+  # --------------------------------------------------------------------
+  # Coverage: build_test.sh --coverage runs the MCP server gates against a gcov build, then the extension's own
+  # sources (src/*.c) through test/coverage_run.sh, which fails below 80% lines, functions or branches. Linux only:
+  # MSVC has no gcov, and the lcov pipeline is proven on one platform.
+  # --------------------------------------------------------------------
+  coverage:
+    name: coverage (lcov)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      DUCKDB_VERSION: v1.5.6
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install toolchain + lcov
+        run: |
+          sudo apt-get update
+          # libssl-dev: the MCP server gates (35-40) are part of --coverage. lcov: the extension report.
+          sudo apt-get install -y --no-install-recommends \
+              build-essential python3 curl unzip libssl-dev lcov
+
+      # Gates 46-56 test the extension against every DuckDB line it supports (1.4.x, 1.5.x, 2.0.x). They look for a CLI and,
+      # on Linux, libduckdb.so under ~/duckdb-cli/<version>/. Without them those gates fail with "need the 1.5.x CLI".
+      # Gates 12 and 25 (the threaded soak and the ledger concurrency run) drive the extension from the duckdb Python package; they skip
+      # those halves cleanly when it is not importable, as in the main gates job, so a wheel resolution failure must not fail this job.
+      - name: Install the duckdb Python package (host for gates 12 and 25)
+        run: python3 -m pip install --break-system-packages "duckdb==${DUCKDB_VERSION#v}" || true
+
+      - name: Stage the DuckDB CLI and library for every supported line
+        run: |
+          set -euo pipefail
+          for v in v1.4.5 v1.5.6 v2.0.0; do
+            bash scripts/fetch_duckdb.sh cli "$v" linux amd64 "$HOME/duckdb-cli/$v"
+            bash scripts/fetch_duckdb.sh libs "$v" linux amd64 "$HOME/duckdb-cli/$v"
+            "$HOME/duckdb-cli/$v/duckdb" --version
+          done
+          # build_test.sh outside a sanitizer cell takes `duckdb` from PATH.
+          echo "$HOME/duckdb-cli/${DUCKDB_VERSION}" >> "$GITHUB_PATH"
+
+      # build_test.sh outside a sanitizer cell does not build the extension: gate 01 locates the artifact under dist/. The
+      # extension is pure C, so a native `make` is seconds (the main gates job builds it with Docker instead).
+      - name: Build fractalsql.duckdb_extension (native make)
+        run: make
+
+      - name: build_test.sh --coverage
+        run: |
+          chmod +x build_test.sh
+          ./build_test.sh --coverage
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: coverage-html
+          path: coverage_html/
+          retention-days: 30
+          if-no-files-found: warn

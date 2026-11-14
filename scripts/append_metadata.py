@@ -17,7 +17,7 @@ Metadata field mapping (matches the cmake script):
     META1 = literal '4'                  metadata format version
     META2 = platform                     e.g. 'linux_amd64_gcc4'
     META3 = duckdb version               e.g. 'v1.1.3'
-    META4 = extension version            e.g. 'v1.0.0'
+    META4 = extension version            e.g. 'v2.0.0'
     META5 = ABI type                     '' for C++ extensions,
                                          'C_STRUCT' for C-API extensions
     META6..8 = empty
@@ -27,7 +27,7 @@ Usage:
         --extension path/to/fractalsql.duckdb_extension \\
         --platform linux_amd64_gcc4 \\
         --duckdb-version v1.1.3 \\
-        --extension-version v1.0.0
+        --extension-version v2.0.0
 """
 
 import argparse
@@ -51,7 +51,7 @@ def build_footer(platform: str, duckdb_version: str,
     f += pad32("")                  # META8
     f += pad32("")                  # META7
     f += pad32("")                  # META6
-    f += pad32(abi_type)            # META5 — empty = C++ extension
+    f += pad32(abi_type)            # META5 -- empty = C++ extension
     f += pad32(extension_version)   # META4
     f += pad32(duckdb_version)      # META3
     f += pad32(platform)            # META2

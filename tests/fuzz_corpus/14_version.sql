@@ -1,0 +1,1 @@
+SELECT fractal_version();

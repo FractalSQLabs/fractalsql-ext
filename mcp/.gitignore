@@ -1,0 +1,5 @@
+/fractalsql-ext-mcp
+/build/
+*.exe
+*.dll
+*.obj

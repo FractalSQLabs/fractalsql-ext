@@ -1,0 +1,3 @@
+-- a comment
+/*r '*/
+SELECT 1;

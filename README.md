@@ -2,247 +2,265 @@
   <img src="FractalSQLforDuckDB.jpg" alt="FractalSQL for DuckDB" width="720">
 </p>
 
-# FractalSQL for DuckDB — Community Edition
+# FractalSQL: Sovereign Data Intelligence
+### AI Database Extension for DuckDB
 
-**A vectorized discovery engine for DuckDB analytical workloads.**
-`fractal_search()` runs Stochastic-Fractal-Search-refined cosine
-distance against any `DOUBLE[]` column — on Parquet, Iceberg, S3, or
-a local table, **without moving a single byte of data**.
+**Vector Search. In-Database Reasoning. Production-Safe Agency. All beside your data.**
 
-The extension plugs into DuckDB's columnar execution engine. SFS
-runs once per distinct query (cached in the function's per-pipeline
-state); the per-row cosine loop runs at full vectorized throughput
-across DuckDB's `DataChunk` batches.
+FractalSQL extends DuckDB into an active agentic database. FractalSQL adds what
+traditional RAG (Retrieval-Augmented Generation) stops short of: reasoning
+over what it retrieves, and when you enable it acting on the result, whether
+that's running a generated query or executing a decision an agent computed, all
+inside the same database process.
 
-## Why
-
-- **Vector search where your data already lives.** Embeddings stored
-  in Parquet / Iceberg / S3: `SELECT … fractal_search(…) FROM
-  read_parquet('s3://…')`. No ETL into a separate vector DB.
-- **Local-first analytics.** DuckDB is increasingly the runtime for
-  notebooks, dbt models, and cloud data-lake query layers. Vector
-  search on that runtime closes the loop.
-- **Zero-dependency extension.** Static LuaJIT, static libstdc++ on
-  Linux, static MSVC CRT on Windows, static libc++ on macOS. The
-  `.duckdb_extension` file has no runtime deps beyond what DuckDB
-  itself already pulls.
-
-## SQL surface
-
-```
-fractalsql_edition() -> VARCHAR              -- 'Community'
-fractalsql_version() -> VARCHAR              -- '1.0.0'
-fractal_search(vector DOUBLE[],
-               query_vector DOUBLE[]) -> DOUBLE
-```
-
-`fractal_search` returns the cosine distance between `vector` and an
-SFS-refined projection of `query_vector` in `[-1, 1]^dim`. The
-refinement is lifted out of the per-row path and cached in
-`FunctionLocalState`, so a typical top-k query pays the SFS cost once.
-
-## Compatibility matrix
-
-| DuckDB version | Codename   | Status           | linux_amd64 | linux_arm64 | osx_amd64 | osx_arm64 | windows_amd64 |
-|----------------|------------|------------------|:-----------:|:-----------:|:---------:|:---------:|:-------------:|
-| 1.2.2          | Histrionicus | legacy ABI       |      ✓      |      ✓      |     ✓     |     ✓     |       ✓       |
-| 1.4.4          | Andium     | LTS (Sept 2026)  |      ✓      |      ✓      |     ✓     |     ✓     |       ✓       |
-| 1.5.2          | Variegata  | current stable   |      ✓      |      ✓      |     ✓     |     ✓     |       ✓       |
-
-DuckDB's C++ extension ABI breaks across minor releases, so there is
-one artifact per (DuckDB version, platform) cell. Each file is named
-`fractalsql.duckdb_extension.<duckdb_version>.<platform>` — the tag
-encodes identity. The loader refuses to load a mismatched build.
-
-Pre-1.2 DuckDB (1.0 / 1.1) is **not shipped**: those versions are
-absent from duckdb.org's download page, 1.1 LTS ended February 2025,
-and both have an extension-loader quirk that crashes unsigned
-third-party extensions at `LOAD` time. Users on those versions
-should upgrade; 1.4.4 LTS is the recommended migration target.
-
-`windows_arm64` is not shipped: DuckDB does not publish a matching
-Windows ARM64 CLI upstream.
-
-## Unsigned extension notice
-
-The Community edition is **unsigned**. DuckDB's loader refuses
-unsigned extensions unless you opt in. The supported opt-ins are:
-
-- Start DuckDB with the `-unsigned` CLI flag (preferred, DuckDB 1.1+).
-- Connect with the `allow_unsigned_extensions=true` config setting,
-  set **before** the database is opened. DuckDB 1.1+ rejects changing
-  this at runtime.
-
-Every install example below uses the `-unsigned` flag. Once a
-signing key is in place for future releases, this step goes away.
-
-## Install
-
-### 1. Download the artifact for your (DuckDB version, platform) cell
-
-Grab the matching file from
-[GitHub Releases](https://github.com/FractalSQLabs/duckdb-fractalsql/releases).
-Each release publishes:
-
-- `fractalsql.duckdb_extension.v<DUCKDB_VER>.<PLATFORM>` — raw extension
-- `duckdb-fractalsql-v<DUCKDB_VER>-<PLATFORM>.zip` — bundle with
-  `LICENSE`, `LICENSE-THIRD-PARTY`, `README.txt`
-
-### 2. Load from the DuckDB shell
-
-```bash
-# 1. Start DuckDB with unsigned extensions allowed:
-duckdb -unsigned
-```
+The retrieval side is genuinely DuckDB-shaped: vector search runs where the
+data already lives, so embeddings sitting in Parquet / Iceberg / S3 stay put
+(Zero-ETL into a separate vector DB):
 
 ```sql
--- 2. LOAD by absolute path to the downloaded file:
-LOAD '/path/to/fractalsql.v1.5.2.linux_amd64.duckdb_extension';
-
--- 3. Verify:
-SELECT fractalsql_edition(), fractalsql_version();
--- returns: ('Community', '1.0.0')
+SELECT id, fractal_search(embedding, $query::DOUBLE[]) AS dist
+FROM read_parquet('s3://my-bucket/embeddings/*.parquet')
+ORDER BY dist LIMIT 50;
 ```
 
-### 3. Or programmatic (Python / Node / R)
+The extension has no runtime dependencies beyond what DuckDB already needs.
+
+By bringing reasoning and agency directly into the DuckDB backend, FractalSQL
+enables **Sovereign Data Intelligence**: the ability to reason, plan, and act
+upon your data with the deployment topology under your control. Run fully
+on-prem or in your own containers with Ollama/vLLM for zero data egress, or
+point at your organization's cloud AI accounts (Bedrock, Azure OpenAI, Vertex),
+where your compliance posture requires it for managed-model scale. You control
+the trade, not the product.
+
+| Traditional RAG Stack | The Sovereign Way (FractalSQL) |
+| --- | --- |
+| **Mode Collapse**: top-K search returns near-duplicates, starving the LLM of diverse context. | **Scout Discovery**: MMR-style diverse semantic search that discovers the data's real structure. |
+| **Fragmented Logic**: app pulls rows, calls LLM, handles retries, and glues answers in middleware. | **In-Database Reasoning**: reasoning and embedding happen inside the DuckDB host process itself. |
+| **Passive Retrieval**: you ask a question, the DB returns rows, and you hope the LLM is correct. | **Autonomous Agency**: self-correcting SQL, loop detection, and trajectory forecasting. |
+
+## From zero to your first agent
+
+FractalSQL's docs follow a single linear path. Each step answers one question
+and hands off to the next. You don't need to read everything; follow the path.
+
+1. **What is this and why do I care?**: you are here. Sovereign Data
+   Intelligence, in one page.
+2. **How do I get the extension running in 60 seconds?** →
+   [Getting Started](docs/getting-started.md) (`LOAD` the extension with
+   `-unsigned`, then your first Scout search).
+3. **How do I apply this to my industry?** → [Starter
+   Kits](docs/starter-kits.md): runnable, industry-specific SQL scripts (SOC,
+   FinTech, MedTech, Fleet, Smart-Cities, automotive, aerospace, telecom,
+   climate tech, RF, …).
+4. **How does a specific agent work and what are its inputs?** → [Agent
+   Recipes](docs/api-agency.md): the built-in agents, each as a recipe.
+5. **How do I build a proprietary agent that isn't in the box?** →
+   [Composition Guide](docs/composition-guide.md): the design patterns behind
+   the recipes.
+
+> New here? Step 2 is a one-command demo. Step 3 drops you into a vertical
+> that looks like your problem. Step 4 is the reference you'll keep coming
+> back to.
+
+## 🎯 Who are you?
+
+Depending on your role, you'll want to start in different places:
+
+- **AI Engineer**: You want to improve RAG quality and reasoning.
+  → Start with [features](docs/features.md) and
+  [reasoning-setup](docs/reasoning-setup.md).
+- **DBA / Security Architect**: You care about stability, safety, and access
+  control. → See the [Safety & Governance guide](docs/text-to-sql-setup.md#secure-it-authorization-vs-correctness).
+- **Product Developer**: You want to build agentic features quickly.
+  → Run the [Docker Demo](docs/docker-demo.md), then pick a
+  [Starter Kit](docs/starter-kits.md).
+
+## 🧩 What's in the box
+
+Four tiers of SQL-callable primitives, composable into agents with plain SQL
+and application code, with no server-side language required.
+
+- **Discovery**: diverse, mode-collapse-free retrieval: `fractal_search`
+  (Sniper), `fractal_search_explore` (Scout).
+- **Cognition**: in-process LLM integration: `fractal_reason` (Bedrock, Azure
+  OpenAI, Vertex, Ollama), `fractal_embed`, `fractal_text_to_sql`.
+- **Agency**: self-correcting routines: the search/sql agents,
+  plan/trajectory/loop-detection helpers, see the [Agent
+  Recipes](docs/api-agency.md). Sixteen recipe agents are registered (see
+  [api-agency.md](docs/api-agency.md)).
+- **Analytics**: fractal/dimension primitives: `fractal_dimension_dfa`,
+  `fractal_dimension_boxcount`, `fractal_optimize_portfolio`, `fractal_cycle_detect`,
+  `fractal_tda_persistence_diagram`, and more.
+
+Plus DuckDB-native plumbing: vectors are plain `LIST(FLOAT)` /
+`LIST(DOUBLE)` values (no separate vector type; the `fractal_vector_*`
+math functions and their `fractal_vector_from/_to_float8_array` bridges work
+on ordinary arrays), the background `fractal_vectorizer` embedding pipeline,
+and the tamper-evident `fractal_ledger_*` audit surface. The full
+function-surface reference with runnable examples lives in
+[docs/features.md](docs/features.md), the per-function detail in
+[api-discovery.md](docs/api-discovery.md), [api-cognition.md](docs/api-cognition.md),
+[api-analytics.md](docs/api-analytics.md), and
+[api-agency.md](docs/api-agency.md).
+
+Reasoning is opt-in and provider-pluggable: the
+[reasoning plugin](https://github.com/FractalSQLabs/fractalsql-reasoning-http)
+speaks the OpenAI chat-completions wire format, so any OpenAI-compatible
+endpoint works. Without a plugin configured, Discovery and Analytics are
+fully functional and Cognition/Agency return clean precondition errors.
+
+## SQL surface at a glance
+
+```
+fractal_edition() -> VARCHAR                     -- 'Community'
+fractal_version() -> VARCHAR                     -- '2.0.0'
+fractal_search(vector DOUBLE[], query DOUBLE[]) -> DOUBLE
+fractal_search_debug(vector, k, max_iter, mdn) -> VARCHAR
+fractal_search_explore(column, query[, options])           -- Scout aggregate
+fractal_search_explore(table, column, query, opts)  -- Scout table function
+fractal_reason(text[, prompt])                      -- via reasoning plugin
+fractal_embed(text) -> LIST(DOUBLE)                 -- via reasoning plugin
+fractal_text_to_sql(question[, tables]) -> VARCHAR
+fractal_vectorizer_create(source_table[, ...])      -- embed pipeline
+fractal_optimize_portfolio(...)                     -- cardinality-constrained
+```
+
+## 🚀 Get it running
+
+The fastest path is one command:
+
+```bash
+{ echo "LOAD '$(pwd)/dist/amd64/fractalsql.v1.5.6.linux_amd64.duckdb_extension';"; \
+  cat demo/demo.sql; } | duckdb -bail -unsigned
+```
+
+The file name includes the DuckDB version it targets. See the
+[compatibility matrix](#compatibility-matrix) to pick yours, and
+[Getting Started](docs/getting-started.md) for the full walkthrough.
+
+### Install
+
+1. **Download the artifact for your (DuckDB version, platform) cell** from
+   [GitHub Releases](https://github.com/FractalSQLabs/fractalsql-ext/releases):
+   - `fractalsql.v<DUCKDB_VER>.<PLATFORM>.duckdb_extension` -- raw extension
+   - `fractalsql-ext-v<DUCKDB_VER>-<PLATFORM>.zip` -- bundle with
+     `LICENSE`, `LICENSE-THIRD-PARTY`, `README.txt`
+2. **Load from the DuckDB shell** (unsigned-opt-in required, see below):
+
+```sql
+LOAD '/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension';
+SELECT fractal_edition(), fractal_version();
+-- returns: ('Community', '2.0.0')
+```
+
+3. **Or programmatic (Python / Node / R)**:
 
 ```python
 import duckdb
 
 con = duckdb.connect(config={"allow_unsigned_extensions": True})
-con.load_extension('/path/to/fractalsql.v1.5.2.linux_amd64.duckdb_extension')
-con.sql("SELECT fractalsql_edition(), fractalsql_version()").show()
+con.load_extension('/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension')
+con.sql("SELECT fractal_edition(), fractal_version()").show()
 ```
 
 ```javascript
 const duckdb = require('duckdb');
 const db = new duckdb.Database(':memory:', { allow_unsigned_extensions: 'true' });
-db.run("LOAD '/path/to/fractalsql.v1.5.2.linux_amd64.duckdb_extension'");
+db.run("LOAD '/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension'");
 ```
 
 ```r
 library(duckdb)
 con <- dbConnect(duckdb(), config = list(allow_unsigned_extensions = "true"))
-dbExecute(con, "LOAD '/path/to/fractalsql.v1.5.2.linux_amd64.duckdb_extension'")
+dbExecute(con, "LOAD '/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension'")
 ```
 
-## Example queries
+### Unsigned extension notice
 
-```sql
-LOAD '/path/to/fractalsql.v1.5.2.linux_amd64.duckdb_extension';
+The FractalSQL Community edition is unsigned, so DuckDB needs an opt-in: start
+the CLI with `-unsigned`, or open the connection with
+`allow_unsigned_extensions=true`. The examples above use one of these.
 
--- Local table.
-CREATE TABLE embeddings AS
-SELECT i AS id, [random(), random(), random()]::DOUBLE[] AS embedding
-FROM range(0, 1000000);
+## 🏛️ FractalSQL Enterprise
 
-SELECT id, fractal_search(embedding, [0.5, 0.5, 0.5]::DOUBLE[]) AS dist
-FROM embeddings
-ORDER BY dist
-LIMIT 10;
-```
+Everything above is FractalSQL Community and fully functional on its own --
+Discovery, Cognition, and Agency don't depend on anything in this section.
+For regulated environments that need to **prove** what an agent decided
+(tamper-evident, hash-chained decision records) and for the multimodal
+portfolio functions `fractal_optimize_portfolio_multimodal` and
+`fractal_optimize_portfolio_multimodal_pareto`, there's a FractalSQL
+Enterprise tier: see
+[FractalSQL Enterprise](docs/enterprise.md) for the full mechanism, including
+what this build's in-memory, per-connection ledger can and can't prove.
 
-```sql
--- Parquet on S3 — no data movement.
-SELECT id,
-       fractal_search(embedding, $query::DOUBLE[]) AS dist
-FROM read_parquet('s3://my-bucket/embeddings/*.parquet')
-ORDER BY dist
-LIMIT 50;
-```
+## 📊 Compatibility & License
 
-```sql
--- Iceberg.
-INSTALL iceberg; LOAD iceberg;
+| DuckDB | Linux | Windows | macOS |
+| --- | :---: | :---: | :---: |
+| 1.4.5 | ✓ | ✓ | ✓ |
+| 1.5.6 | ✓ | ✓ | ✓ |
+| 2.0.0 | ✓ | ✓ | ✓ |
 
-SELECT id,
-       fractal_search(embedding, [0.1, 0.2, 0.3]::DOUBLE[]) AS dist
-FROM iceberg_scan('s3://my-warehouse/embeddings_iceberg/')
-ORDER BY dist
-LIMIT 25;
-```
+The latest patch release of each DuckDB line is supported. DuckDB 1.5.6 and
+2.0.0 load the same stable-API build; DuckDB's 1.4 line has an unstable
+extension API, so its build is tied to one 1.4.x release. The file name includes
+the DuckDB version, and DuckDB refuses to load a 1.4 build on a different
+version.
+
+**License**: Apache-2.0. See `LICENSE`. Third-party components are under their
+own permissive licenses (BSD-2-Clause, MIT, and others). See
+`THIRD-PARTY-NOTICES.md`, which ships inside each release archive as
+`LICENSE-THIRD-PARTY`.
+
+DuckDB is a trademark of the DuckDB Foundation. FractalSQL is not affiliated
+with or endorsed by the DuckDB Foundation.
+
+For FractalSQL Enterprise licensing and support, contact
+**enterprise@fractalsqlabs.com**.
 
 ## Building from source
 
-```bash
-./build.sh amd64    # -> dist/amd64/fractalsql.v1.5.2.linux_amd64.duckdb_extension
-./build.sh arm64    # -> dist/arm64/fractalsql.v1.5.2.linux_arm64.duckdb_extension
+The extension is plain C and calls DuckDB through its C extension API, so a
+build takes seconds and needs no DuckDB source.
 
-# Pin a different DuckDB version:
-DUCKDB_VERSION=v1.2.2 ./build.sh amd64
+```bash
+make                # native build -> dist/<platform>/ (Linux and macOS)
+
+./build.sh amd64    # in Docker (glibc 2.34 baseline), one file per DuckDB version:
+./build.sh arm64    #   dist/<arch>/fractalsql.v1.4.5.linux_<arch>.duckdb_extension
+                    #   dist/<arch>/fractalsql.v1.5.6.linux_<arch>.duckdb_extension
+                    #   dist/<arch>/fractalsql.v2.0.0.linux_<arch>.duckdb_extension
 ```
 
-The Dockerfile (see `docker/Dockerfile`):
+On Windows, run `scripts\windows\build.bat` from a Developer Command Prompt
+for VS 2022 x64.
 
-- Compiles LuaJIT 2.1 from source with `-fPIC BUILDMODE=static`, so
-  the archive can fold into a shared object.
-- Fetches DuckDB's full source tree at the pinned tag via CMake
-  `FetchContent` (the `libduckdb-*.zip` release bundle omits the
-  extension-facing API).
-- Selects the C++ ABI per DuckDB version: **legacy gcc4**
-  (`-D_GLIBCXX_USE_CXX11_ABI=0`, platform label
-  `linux_<arch>_gcc4`) for v1.2.x, **new libstdc++** (platform
-  label `linux_<arch>`) for v1.3+. The upstream CLI's ABI changed
-  here, so extensions have to follow. Overridable via
-  `-DLEGACY_CXX11_ABI=ON|OFF`.
-- Links `-static-libgcc -static-libstdc++` and runs
-  `docker/assert_so.sh` to gate the output on ldd / nm / size / .dynsym
-  assertions.
+## 📚 Documentation
 
-Windows: `scripts\windows\build.bat` (run from a Developer Command
-Prompt for VS 2022 x64). Static CRT via
-`CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` under CMake policy
-`CMP0091 NEW`, static LuaJIT (`lua51.lib` from `msvcbuild.bat
-static`), plus `dumpbin /dependents` and `/exports` post-build
-checks. `/GL` + `/LTCG` are **not** used — at DuckDB's compile
-volume they push `duckdb_static.lib` past MSVC's 4 GiB static-
-library size cap (`LNK1248`).
+*Follow the path above; the links below are the same steps, expanded.*
 
-## Vectorized execution model
+- **[Getting Started](docs/getting-started.md)**: 60-second install and your
+  first search.
+- **[Starter Kits](docs/starter-kits.md)**: industry-specific runnable SQL
+  scripts.
+- **[Agent Recipes](docs/api-agency.md)**: the sixteen installable agents,
+  each as a recipe.
+- **[Composition Guide](docs/composition-guide.md)**: build your own agent.
+- **[Features](docs/features.md)**: the full Capability Map and API reference.
+- **[Reasoning Setup](docs/reasoning-setup.md)**: LLM provider configuration
+  (Ollama, OpenAI, Bedrock, Azure, Vertex).
+- **[Text-to-SQL Setup](docs/text-to-sql-setup.md)**: pipeline details and the
+  security model.
+- **[Vectorizer Setup](docs/vectorizer-setup.md)**: automatic embedding
+  pipelines.
+- **[MCP Plugin](docs/mcp-plugin.md)**: use FractalSQL from Claude Desktop, Cursor, Windsurf, LangChain, LlamaIndex, CrewAI, and many more MCP clients.
+- **[Docker Demo](docs/docker-demo.md)**: from extension artifact to running
+  a demo.
+- **[Agent Blueprint Gallery](demo/README.md)**: the vertical demos, reference
+  agents, and lakehouse demos for Iceberg and DuckLake.
+- **[Benchmark](bench/README.md)**: HNSW vs Scout Mode, and Iceberg vs DuckLake
+  commit and query cost.
+- **[FractalSQL Enterprise](docs/enterprise.md)**: the tamper-evident decision
+  ledger (CISO/audit).
 
-`fractal_search` is built around one observation: **the
-`query_vector` is nearly always constant per statement**. DuckDB
-passes it as a `CONSTANT_VECTOR`, which lets us:
-
-1. Pull the query once per `DataChunk`.
-2. Run SFS once per distinct query (cached in
-   `FunctionLocalState`), producing a refined best_point in R^dim.
-3. Iterate the `DataChunk`'s `LIST<DOUBLE>` rows with a tight cosine
-   distance loop against best_point.
-
-Thread model: DuckDB allocates one `FunctionLocalState` per pipeline
-thread via `init_local`, so each thread gets its own Lua state. No
-global mutex in the fast path.
-
-Runtime Lua parser: not present. The SFS optimizer ships as
-pre-stripped LuaJIT bytecode embedded as a C byte array
-(`include/sfs_core_bc.h`, symbol `luaJIT_BC_fractalsql_community`).
-Loading at extension init is a single `luaL_loadbuffer` over
-in-memory bytes.
-
-## Roadmap
-
-- **Aggregate function** — `fractal_search_top_k(embedding, query, k)`
-  returning a `LIST` of `(idx, dist)` pairs in one shot instead of
-  `ORDER BY ... LIMIT k`.
-- **Native DuckDB ARRAY types** — accept `DOUBLE[dim]` fixed-size
-  arrays in addition to `DOUBLE[]` variable lists.
-- **Signed extension distribution** — drop the `-unsigned` gate once
-  a signing key is in place.
-
-## Third-Party Components
-
-The SFS optimizer is based on Salimi, "Stochastic Fractal Search"
-(2014), under BSD-2-Clause. LuaJIT is distributed under the MIT
-License. Full notices in
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) (shipped inside
-each release archive as `LICENSE-THIRD-PARTY`).
-
-## License
-
-MIT. See `LICENSE`.
-
----
-
-[github.com/FractalSQLabs](https://github.com/FractalSQLabs) · Issues
-and PRs welcome.

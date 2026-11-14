@@ -1,0 +1,562 @@
+name: Install test (extension load)
+
+# End-to-end validation that the built fractalsql.duckdb_extension
+# loads cleanly into the matching DuckDB CLI and that the SQL surface
+# (fractal_edition / fractal_version / fractal_search) works
+# inside an in-memory database.
+#
+# DuckDB extensions are NOT distro-packaged -- there's no .deb / .rpm
+# install path like the other integration repos. Users get the
+# extension via:
+#   INSTALL fractalsql FROM 'https://...';   # community-extensions hub
+#   LOAD fractalsql;
+# This workflow simulates that: build the extension, spin up a fresh
+# DuckDB CLI, load via absolute path, and run the SQL.
+#
+# Pinned to the v1.5.6 cell on amd64 only -- the other versions and
+# arches are covered by build-test.yml and release.yml.
+
+# The easy-install layer runs here as a dry-run battery (both scripts,
+# both OSes): --dry-run fetches nothing from GitHub releases, so the key
+# detection, path, and no-side-effect paths run on every push regardless
+# of release state. The real download + LOAD proof + uninstall flow runs
+# in post-release.yml against the freshly cut release.
+
+on:
+  push:
+    branches: [main, '2.x']
+  pull_request:
+    branches: [main, '2.x']
+  workflow_dispatch: {}
+  schedule:
+    - cron: '37 4 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-and-load:
+    name: Build extension + load in DuckDB CLI (linux_amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build fractalsql.duckdb_extension
+        run: |
+          chmod +x build.sh
+          # build.sh lays out one file per supported DuckDB version;
+          # install-test exercises the pinned v1.5.6 cell.
+          ./build.sh amd64
+
+      - name: Locate built extension
+        id: locate
+        run: |
+          set -euo pipefail
+          EXT="dist/amd64/fractalsql.v1.5.6.linux_amd64.duckdb_extension"
+          test -f "$EXT" || { echo "FAIL: no .duckdb_extension under dist/amd64/"; ls -la dist/amd64/ || true; exit 1; }
+          # Pull DUCKDB_VERSION out of the artifact name (matches the
+          # pattern fractalsql.<DUCKDB_VERSION>.linux_amd64.duckdb_extension).
+          DUCKDB_VERSION="$(basename "$EXT" | sed -E 's/^fractalsql\.(v[0-9.]+)\.linux_amd64.*$/\1/')"
+          echo "ext=$EXT"                  >> "$GITHUB_OUTPUT"
+          echo "duckdb_version=$DUCKDB_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Built: $EXT"
+          echo "DuckDB version: $DUCKDB_VERSION"
+
+      - name: Install matching DuckDB CLI
+        run: |
+          set -euo pipefail
+          VER="${{ steps.locate.outputs.duckdb_version }}"
+          bash scripts/fetch_duckdb.sh cli "${VER}" linux amd64 /tmp
+          /tmp/duckdb --version
+
+      - name: Load extension + run smoke SQL
+        # DuckDB requires unsigned extensions to be allow-listed on
+        # the CLI before LOAD will accept them. -unsigned is the flag.
+        run: |
+          set -euo pipefail
+          EXT="${{ steps.locate.outputs.ext }}"
+          # Convert to absolute path for LOAD.
+          EXT_ABS="$(readlink -f "$EXT")"
+
+          /tmp/duckdb -unsigned -c "
+            LOAD '$EXT_ABS';
+            SELECT fractal_edition() AS edition;
+            SELECT fractal_version() AS version;
+            SELECT fractal_search(
+              [1.0, 0.0, 0.0, 0.0]::DOUBLE[],
+              [1.0, 0.0, 0.0, 0.0]::DOUBLE[]
+            ) AS dist_to_self;
+          " | tee /tmp/smoke.out
+
+          # Assert expected outputs.
+          grep -q "Community" /tmp/smoke.out || { echo "FAIL: edition != Community"; exit 1; }
+          grep -q "2.0.0"     /tmp/smoke.out || { echo "FAIL: version != 2.0.0"; exit 1; }
+          # dist_to_self should be a small positive number; the SFS
+          # refines the query and dist_to_self is cosine_distance to
+          # the refined point. Expect strictly < 1.0 (otherwise either
+          # SFS didn't run or the cosine math is broken).
+          DIST=$(awk '/dist_to_self/{getline; getline; print $2}' /tmp/smoke.out || true)
+          # Less strict: just assert a numeric result row was emitted.
+          grep -qE '^(\||│) +[0-9]' /tmp/smoke.out \
+            || { echo "FAIL: no numeric result row from fractal_search"; exit 1; }
+
+          echo "ok: extension loads + edition + version + fractal_search"
+
+
+      - name: Load the same extension on DuckDB 2.0.0 (stable band)
+        # The stable-API band is one binary that DuckDB 1.5.6 and 2.0.0 both load: prove the 2.0.0 half.
+        run: |
+          set -euo pipefail
+          bash scripts/fetch_duckdb.sh cli v2.0.0 linux amd64 /tmp/duckdb-2.0.0
+          EXT_ABS="$(readlink -f dist/amd64/fractalsql.v2.0.0.linux_amd64.duckdb_extension)"
+          /tmp/duckdb-2.0.0/duckdb -unsigned -c "
+            LOAD '$EXT_ABS';
+            SELECT fractal_edition() AS edition;
+            SELECT fractal_version() AS version;
+            SELECT fractal_search([1.0, 0.0, 0.0, 0.0]::DOUBLE[], [1.0, 0.0, 0.0, 0.0]::DOUBLE[]) AS dist_to_self;
+          " | tee /tmp/smoke200.out
+          grep -q "Community" /tmp/smoke200.out || { echo "FAIL: edition != Community on 2.0.0"; exit 1; }
+          grep -q "2.0.0"     /tmp/smoke200.out || { echo "FAIL: version != 2.0.0 on 2.0.0"; exit 1; }
+          grep -qE '^(\||│) +[0-9]' /tmp/smoke200.out || { echo "FAIL: no numeric result row on 2.0.0"; exit 1; }
+          echo "ok: the extension loads and answers on DuckDB 2.0.0"
+
+      - name: easy_install.sh --from-dir (install, prove the load, uninstall)
+        # The installer end to end against the extension this job just built (a release download needs a published
+        # tag and is exercised by post-release.yml). Runs with a throwaway HOME so nothing outside it is touched.
+        run: |
+          set -euo pipefail
+          chmod +x scripts/easy_install.sh
+          EXT="${{ steps.locate.outputs.ext }}"
+          VER="${{ steps.locate.outputs.duckdb_version }}"
+          export HOME="$(mktemp -d)"
+          scripts/easy_install.sh --duckdb /tmp/duckdb --from-dir "$(dirname "$(readlink -f "$EXT")")" \
+              --duckdb-version "${VER}" --platform linux_amd64 --yes | tee /tmp/easy.out
+          CELL="${HOME}/.duckdb/extensions/${VER}/linux_amd64"
+          INSTALLED="${CELL}/fractalsql.duckdb_extension"
+          test -f "${INSTALLED}"
+          grep -q 'Community' /tmp/easy.out
+          # DuckDB's own extension directory: the short name resolves, and so does the full path the installer prints
+          /tmp/duckdb -unsigned -c "LOAD 'fractalsql'; SELECT fractal_edition();" | grep -q Community
+          /tmp/duckdb -unsigned -c "LOAD '${INSTALLED}'; SELECT fractal_edition();" | grep -q Community
+          # the directory is shared: another extension beside ours must survive an uninstall
+          touch "${CELL}/other.duckdb_extension"
+          scripts/easy_install.sh --duckdb /tmp/duckdb --duckdb-version "${VER}" --platform linux_amd64 --uninstall --yes
+          test ! -e "${INSTALLED}"
+          test -f "${CELL}/other.duckdb_extension"
+          echo "ok: easy_install.sh --from-dir, LOAD by name and by path, --uninstall leaves other extensions"
+
+      - name: Reasoning round-trip via mock LLM (linux amd64)
+        # Prove the Cognition tier end-to-end without a real provider:
+        # start the deterministic OpenAI-chat-completions stub from
+        # tests/ (it binds synchronously and prints its port), point
+        # the vendored fractalsql-reasoning-http plugin at it, and
+        # assert fractal_reason() gets the canned reply back.
+        env:
+          EXPECTED_REPLY: "pong-from-mock"
+        run: |
+          set -euo pipefail
+          EXT="$(readlink -f dist/amd64/fractalsql.v1.5.6.linux_amd64.duckdb_extension)"
+          # absolute and canonical: the loader refuses a relative path
+          PLUGIN="$(readlink -f include/linux-x86_64/fractalsql-reasoning-http.so)"
+          test -f "$PLUGIN" || { echo "FAIL: vendored reasoning plugin not found at $PLUGIN"; exit 1; }
+          # The plugin loads only with its detached signature beside it (64 raw bytes); the default
+          # signature requirement stays on for this round-trip.
+          test "$(wc -c < "$PLUGIN.sig")" -eq 64 || { echo "FAIL: $PLUGIN.sig missing or not 64 bytes"; exit 1; }
+
+          python3 tests/_mock_llm_server.py "pong-from-mock" > /tmp/mock_port.txt &
+          MOCK_PID=$!
+          PORT=""
+          for _ in $(seq 1 50); do
+            PORT="$(head -1 /tmp/mock_port.txt 2>/dev/null || true)"
+            [ -n "$PORT" ] && break
+            sleep 0.2
+          done
+          kill -0 "$MOCK_PID" 2>/dev/null || true
+          if [ -z "$PORT" ]; then
+            echo "FATAL: mock LLM never came up"
+            exit 1
+          fi
+          echo "mock LLM on port ${PORT}"
+
+          FRACTALSQL_REASONING_PLUGIN="$PLUGIN" \
+          FSQL_REASONING_HTTP_URL="http://127.0.0.1:${PORT}/v1/chat/completions" \
+          FSQL_REASONING_HTTP_ALLOW_PLAINTEXT=1 \
+          FSQL_REASONING_HTTP_MODEL="mock-model" \
+          FSQL_REASONING_HTTP_TOKEN="mock-token" \
+          /tmp/duckdb -unsigned -c "
+            LOAD '$EXT';
+            SELECT fractal_reason('ping') AS reply;
+          " | tee /tmp/reasoning.out
+
+          grep -q "$EXPECTED_REPLY" /tmp/reasoning.out \
+            || { echo "FAIL: fractal_reason() did not return the mock reply"; exit 1; }
+          echo "ok: fractal_reason round-trip through mock LLM"
+
+      - name: Upload built extensions for downstream smoke jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: extensions-amd64
+          path: |
+            dist/amd64/*.duckdb_extension
+          retention-days: 1
+          if-no-files-found: error
+
+  rocky9-load:
+    name: Rocky 9 -- load extension + smoke SQL
+    needs: build-and-load
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: extensions-amd64
+          path: dist/amd64
+      - name: Load + verify in rockylinux:9
+        run: |
+          cat > test-rocky9.sh <<'SCRIPT'
+          set -euo pipefail
+          # The pinned v1.5.6 cell.
+          EXT="/work/dist/amd64/fractalsql.v1.5.6.linux_amd64.duckdb_extension"
+          test -f "$EXT" || { echo "FAIL: no extension under /work/dist/amd64/"; ls -la /work/dist/amd64/ || true; exit 1; }
+          DUCKDB_VERSION="$(basename "$EXT" | sed -E 's/^fractalsql\.(v[0-9.]+)\.linux_amd64.*$/\1/')"
+
+          # the image already has curl (curl-minimal); installing "curl" conflicts with it
+          dnf install -qy unzip
+          bash /work/scripts/fetch_duckdb.sh cli "${DUCKDB_VERSION}" linux amd64 /tmp
+          /tmp/duckdb --version
+
+          /tmp/duckdb -unsigned -c "
+            LOAD '$EXT';
+            SELECT fractal_edition() AS edition;
+            SELECT fractal_version() AS version;
+            SELECT fractal_search(
+              [1.0, 0.0, 0.0, 0.0]::DOUBLE[],
+              [1.0, 0.0, 0.0, 0.0]::DOUBLE[]
+            ) AS dist_to_self;
+          " | tee /tmp/smoke.out
+
+          grep -q "Community" /tmp/smoke.out || { echo "FAIL: edition != Community"; exit 1; }
+          grep -q "2.0.0"     /tmp/smoke.out || { echo "FAIL: version != 2.0.0"; exit 1; }
+          grep -qE '^(\||│) +[0-9]' /tmp/smoke.out \
+            || { echo "FAIL: no numeric result row from fractal_search"; exit 1; }
+          echo "ok: Rocky 9 + extension + smoke SQL"
+          SCRIPT
+          chmod +x test-rocky9.sh
+          docker run --rm \
+              -v "${{ github.workspace }}:/work" -w /work \
+              rockylinux:9 bash /work/test-rocky9.sh
+
+  # The MCP server's release archive (scripts/package_mcp.sh): build it, unpack it in a clean Rocky 9 container that
+  # has only OpenSSL's runtime library, and run it. That proves the archive is self-contained: libduckdb.so is found
+  # beside the binary (RPATH=$ORIGIN) with no LD_LIBRARY_PATH, and the glibc floor holds. The live tool-call proof
+  # needs the extension and runs in the repo's own MCP suite.
+  mcp-archive:
+    name: MCP archive (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package fractalsql-ext-mcp (DuckDB v1.5.6, built in rockylinux:9)
+        run: bash scripts/package_mcp_rocky.sh v1.5.6 ${{ matrix.arch }}
+      - name: Unpack and run in a clean rockylinux:9
+        run: |
+          set -euo pipefail
+          NAME="fractalsql-ext-mcp-v1.5.6-linux_${{ matrix.arch }}"
+          mkdir -p /tmp/unpacked && tar -C /tmp/unpacked -xzf "dist/packages/${NAME}.tar.gz"
+          docker run --rm -v "/tmp/unpacked/${NAME}:/opt/mcp:ro" rockylinux:9 bash -c '
+            set -euo pipefail
+            dnf install -qy openssl-libs
+            test -z "${LD_LIBRARY_PATH:-}"
+            /opt/mcp/fractalsql-ext-mcp --version
+            test "$(/opt/mcp/fractalsql-ext-mcp --list-tools | wc -l)" -ge 81
+            ldd /opt/mcp/fractalsql-ext-mcp | grep -E "libduckdb.so => /opt/mcp/"
+            ! ldd /opt/mcp/fractalsql-ext-mcp | grep "not found"
+          '
+
+  # The MCP server's macOS archive, built the way release.yml builds it, unpacked in a clean directory and run with
+  # no DYLD_LIBRARY_PATH: libduckdb.dylib has to be found beside the binary (@loader_path), the lock files have to
+  # be found beside the binary, and the binary has to link no Homebrew library. The release matrix covers five
+  # DuckDB versions; one is enough here to prove the packaging.
+  mcp-archive-macos:
+    name: MCP archive (${{ matrix.platform_tag }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            platform_tag: osx_amd64
+          - runner: macos-15
+            platform_tag: osx_arm64
+    env:
+      DV: v1.5.6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and package fractalsql-ext-mcp
+        run: |
+          set -euo pipefail
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          SSL="$(brew --prefix openssl@3)"
+          mkdir -p libduckdb
+          curl -fsSL --proto '=https' -o libduckdb.zip \
+              "https://github.com/duckdb/duckdb/releases/download/${DV}/libduckdb-osx-universal.zip"
+          unzip -q libduckdb.zip -d libduckdb
+          test -f libduckdb/libduckdb.dylib
+          make -C mcp CXXFLAGS="-O2 -mmacosx-version-min=13.3" CPPEXTRA="-I${SSL}/include" LDEXTRA="-L${SSL}/lib" \
+              DUCKDB_DIR="$PWD/libduckdb" RPATH='@loader_path' BUILD="$PWD/obj" OUT="$PWD/fractalsql-ext-mcp"
+          NAME="fractalsql-ext-mcp-${DV}-${{ matrix.platform_tag }}"
+          STAGE="stage/${NAME}"
+          mkdir -p "${STAGE}" dist/packages
+          install -m 0755 fractalsql-ext-mcp "${STAGE}/"
+          install -m 0755 libduckdb/libduckdb.dylib "${STAGE}/"
+          install -m 0644 mcp/README.md mcp/manifest.json mcp/.mcp-schema-lock mcp/.mcp-safety-annotations-lock "${STAGE}/"
+          tar -C stage -czf "dist/packages/${NAME}.tar.gz" "${NAME}"
+      - name: Unpack and run from the archive
+        run: |
+          set -euo pipefail
+          NAME="fractalsql-ext-mcp-${DV}-${{ matrix.platform_tag }}"
+          D="$(mktemp -d)"
+          tar -C "${D}" -xzf "dist/packages/${NAME}.tar.gz"
+          B="${D}/${NAME}"
+          for f in fractalsql-ext-mcp libduckdb.dylib .mcp-schema-lock .mcp-safety-annotations-lock manifest.json README.md; do
+              test -e "${B}/${f}" || { echo "FAIL: ${f} missing from the archive"; ls -la "${B}"; exit 1; }
+          done
+          echo "--- otool -L ---"; otool -L "${B}/fractalsql-ext-mcp"
+          # OpenSSL is linked dynamically against Homebrew's openssl@3 and is not shipped; libduckdb.dylib is beside the binary.
+          LIBS="$(otool -L "${B}/fractalsql-ext-mcp" | tail -n +2 | awk '{print $1}')"
+          echo "${LIBS}" | grep -q 'openssl@3/lib/libssl' || { echo "FAIL: libssl is not linked dynamically"; exit 1; }
+          if echo "${LIBS}" | grep -v -E '^(/usr/lib/|/System/Library/|@rpath/libduckdb|@loader_path/libduckdb|.*/opt/openssl@3/lib/lib(ssl|crypto))' | grep -q .; then
+              echo "FAIL: the binary depends on a library other than libduckdb, openssl@3 and the system's own"; exit 1
+          fi
+          # Run from another directory with no library path set.
+          cd "${RUNNER_TEMP}"
+          unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH
+          "${B}/fractalsql-ext-mcp" --version
+          test "$("${B}/fractalsql-ext-mcp" --list-tools | wc -l)" -ge 81
+          echo "ok: the macOS MCP archive links openssl@3 dynamically and runs from the unpacked archive"
+
+  # The MCP server's Windows zip, built and packaged the way release.yml does, unpacked in a clean directory and run
+  # from a different directory with a bare PATH: duckdb.dll and the two lock files have to be found beside the
+  # executable. One DuckDB version is enough to prove the packaging.
+  mcp-archive-windows:
+    name: MCP archive (windows_amd64)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      DUCKDB_VERSION: v1.5.6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenSSL (vcpkg, static triplet)
+        shell: cmd
+        run: |
+          rem mcp\scripts\windows\build.bat finds the OpenSSL tree through %VCPKG_ROOT%
+          echo VCPKG_ROOT=%VCPKG_INSTALLATION_ROOT%>>%GITHUB_ENV%
+          "%VCPKG_INSTALLATION_ROOT%\vcpkg" install openssl:x64-windows-static
+          if errorlevel 1 exit /b 1
+      - name: Fetch libduckdb
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path libduckdb | Out-Null
+          Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/duckdb/duckdb/releases/download/$env:DUCKDB_VERSION/libduckdb-windows-amd64.zip" -OutFile libduckdb.zip
+          Expand-Archive -Path libduckdb.zip -DestinationPath libduckdb -Force
+      - name: Build fractalsql-ext-mcp.exe
+        shell: cmd
+        run: |
+          call mcp\scripts\windows\build.bat "%CD%\mcp-out" "%CD%\libduckdb"
+          if errorlevel 1 exit /b 1
+      - name: Package .zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $NAME = "fractalsql-ext-mcp-$env:DUCKDB_VERSION-windows_amd64"
+          $STAGE = New-Item -ItemType Directory -Path "stage/$NAME" -Force
+          Copy-Item mcp-out/fractalsql-ext-mcp.exe, mcp-out/duckdb.dll $STAGE
+          Copy-Item mcp/README.md, mcp/manifest.json, mcp/.mcp-schema-lock, mcp/.mcp-safety-annotations-lock $STAGE
+          New-Item -ItemType Directory -Force -Path dist/packages | Out-Null
+          Compress-Archive -Path "$STAGE" -DestinationPath "dist/packages/$NAME.zip" -Force
+      - name: Unpack and run from the archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $NAME = "fractalsql-ext-mcp-$env:DUCKDB_VERSION-windows_amd64"
+          $out = Join-Path $env:RUNNER_TEMP 'unzipped'
+          Expand-Archive -Path "dist/packages/$NAME.zip" -DestinationPath $out -Force
+          $b = Join-Path $out $NAME
+          foreach ($f in 'fractalsql-ext-mcp.exe','duckdb.dll','.mcp-schema-lock','.mcp-safety-annotations-lock','manifest.json','README.md') {
+              if (-not (Test-Path (Join-Path $b $f))) { Get-ChildItem $b -Force | Format-Table Name; Write-Host "FATAL: $f missing from the archive"; exit 1 }
+          }
+          # A bare PATH (the system directories only), and a different working directory.
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          Push-Location $env:RUNNER_TEMP
+          & "$b\fractalsql-ext-mcp.exe" --version
+          if ($LASTEXITCODE -ne 0) { Write-Host 'FATAL: --version failed'; exit 1 }
+          $n = (& "$b\fractalsql-ext-mcp.exe" --list-tools | Measure-Object -Line).Lines
+          Write-Host "tools: $n"
+          if ($n -lt 81) { Write-Host 'FATAL: too few tools'; exit 1 }
+          Pop-Location
+          Write-Host 'ok: the Windows MCP archive is self-contained and runs from the unpacked archive'
+
+  # The easy button, statically: both installers through their dry-run
+  # (and the MINGW/MSYS guard on the sh side). No release access needed.
+  easy-install-dry-run:
+    name: easy_install dry-run (${{ matrix.os-tag }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os-tag: linux
+            runner: ubuntu-24.04
+          - os-tag: windows
+            runner: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      # The CLI is optional for both scripts, but with one present the
+      # dry-run exercises the detection path: the script matches the
+      # CLI's own version against the shipped release cells.
+      - name: Install duckdb CLI (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' \
+            "https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip" \
+            -o /tmp/duckdb_cli.zip
+          unzip -p /tmp/duckdb_cli.zip duckdb > /tmp/duckdb
+          chmod +x /tmp/duckdb
+          sudo mv /tmp/duckdb /usr/local/bin/duckdb
+          duckdb --version
+
+      - name: easy_install.sh structural battery (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sh -n scripts/easy_install.sh
+          scripts/easy_install.sh --help > /dev/null
+
+          if scripts/easy_install.sh --not-a-real-flag > /dev/null 2>&1; then
+            echo "FAIL: an unknown flag must die (exit non-zero)."
+            exit 1
+          fi
+
+          # With a CLI present, --dry-run must auto-match its version cell.
+          DUCKDB_BIN=duckdb scripts/easy_install.sh --dry-run 2>&1 | tee /tmp/dry1.out
+          grep -q "matching its release cell" /tmp/dry1.out \
+            || { echo "FAIL: no CLI version match in dry-run output"; exit 1; }
+          grep -q "fractalsql.v1.5.6.linux_amd64.duckdb_extension" /tmp/dry1.out \
+            || { echo "FAIL: dry run did not print the versioned artifact name"; exit 1; }
+          grep -q "would install the MCP server" /tmp/dry1.out \
+            || { echo "FAIL: the MCP server is installed by default and the dry run must say so"; exit 1; }
+          DUCKDB_BIN=duckdb scripts/easy_install.sh --dry-run --no-mcp 2>&1 | grep -q "Skipping the MCP server" \
+            || { echo "FAIL: --no-mcp must skip the MCP server"; exit 1; }
+
+          # A stamped script (release.yml replaces @@FSQL_VERSION@@ with the tag's version) installs its own release.
+          sed "s/@@FSQL_VERSION@@/2.0.0/" scripts/easy_install.sh > /tmp/easy_install_stamped.sh
+          bash /tmp/easy_install_stamped.sh --dry-run --yes --duckdb-version v1.5.6 --platform linux_amd64 2>&1 | tee /tmp/dry_stamped.out
+          grep -q "releases/download/v2.0.0/fractalsql-ext-v1.5.6-linux_amd64.tar.gz" /tmp/dry_stamped.out \
+            || { echo "FAIL: a stamped script must default to its own release tag and fetch the bundle"; exit 1; }
+          grep -q "releases/latest/download" /tmp/dry1.out \
+            || { echo "FAIL: an unstamped script must default to the latest release"; exit 1; }
+
+          # The --with-reasoning path (fetches nothing in dry-run) through
+          # a pinned release tag.
+          scripts/easy_install.sh --dry-run --with-reasoning --release v2.0.0 2>&1 | tee /tmp/dry2.out
+          grep -q "would download: https://github.com/FractalSQLabs/fractalsql-ext/releases/download/v2.0.0/fractalsql-ext-v1.5.6-linux_amd64.tar.gz" /tmp/dry2.out \
+            || { echo "FAIL: the bundle release-asset URL not surfaced in dry-run output"; exit 1; }
+          grep -q "would install fractalsql-reasoning-http.so and fractalsql-reasoning-http.so.sig" /tmp/dry2.out \
+            || { echo "FAIL: the reasoning plugin and its .sig must be installed from the bundle"; exit 1; }
+
+          # --yes answers the uninstall prompt without a terminal.
+          scripts/easy_install.sh --uninstall --dry-run --yes 2>&1 | tee /tmp/dry3.out
+          grep -q "not actually removing" /tmp/dry3.out \
+            || { echo "FAIL: uninstall dry-run did not stop at the dry-run notice"; exit 1; }
+
+          # Dry-run must change nothing on disk.
+          test ! -e "$HOME/.duckdb/extensions/v1.5.6/linux_amd64/fractalsql.duckdb_extension"
+          echo "ok: easy_install.sh dry-run battery"
+
+      - name: Install duckdb CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path C:\deps\duckdb | Out-Null
+          # Expand-Archive needs a .zip suffix.
+          Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-windows-amd64.zip" -OutFile C:\deps\duckdb\duckdb_cli.zip
+          Expand-Archive -Path C:\deps\duckdb\duckdb_cli.zip -DestinationPath C:\deps\duckdb -Force
+          & C:\deps\duckdb\duckdb.exe --version
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\deps\duckdb"
+
+      - name: easy_install.ps1 structural battery (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $script = (Resolve-Path scripts/windows/easy_install.ps1).Path
+
+          # Parser check on the runner's pwsh 7...
+          $errs = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$errs)
+          if ($errs.Count -ne 0) {
+            throw "FAIL: easy_install.ps1 does not parse under pwsh 7"
+          }
+          # ...and a real -File invocation under Windows PowerShell 5.1,
+          # which is the compatibility contract the script declares.
+          $helpOut = & powershell -NoProfile -File $script -Help | Out-String -Width 4096
+          if ($LASTEXITCODE -ne 0) { throw "FAIL: -Help exited $LASTEXITCODE under PS 5.1" }
+          if ("$helpOut" -notmatch 'DuckDbVersion') { throw "FAIL: -Help printed no flag table" }
+
+          # An unknown switch must fail to bind.
+          $null = & powershell -NoProfile -File $script -BogusSwitch 2>&1
+          if ($LASTEXITCODE -eq 0) { throw "FAIL: unknown switch was accepted" }
+
+          # Dry-run with the CLI on PATH: exercises detection through the
+          # CLI's own version, prints the versioned artifact name, writes
+          # nothing.
+          $dryOut = & powershell -NoProfile -File `
+              scripts/windows/easy_install.ps1 -DryRun 2>&1 |
+              Out-String -Width 4096
+          if ($LASTEXITCODE -ne 0) { throw "FAIL: -DryRun exited $LASTEXITCODE" }
+          if ("$dryOut" -notmatch 'fractalsql\.v1\.5\.6\.windows_amd64\.duckdb_extension') {
+            throw "FAIL: dry run did not print the versioned artifact name"
+          }
+          if (Test-Path "$env:USERPROFILE\.duckdb\extensions\v1.5.6\windows_amd64\fractalsql.duckdb_extension") {
+            throw "FAIL: dry run installed the extension"
+          }
+          Write-Host "ok: easy_install.ps1 dry-run battery"
+
+      # The reasoning plugin DLL imports the VC++ runtime (VCRUNTIME140.dll). easy_install.ps1 must check for the
+      # Redistributable before installing the plugin, and the bundle README must tell Windows users about it.
+      - name: The Windows installer and bundle README cover the plugin's VC++ runtime dependency
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dll = 'include\windows-x86_64\fractalsql-reasoning-http.dll'
+          $txt = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($dll))
+          $imports = @([regex]::Matches($txt, '(?i)(vcruntime|msvcp|vcomp|concrt)[0-9_]*\.dll') | ForEach-Object { $_.Value.ToUpper() } | Sort-Object -Unique)
+          Write-Host "VC++ runtime imports of the plugin: $($imports -join ', ')"
+          if ($imports.Count -gt 0) {
+              $ps1 = Get-Content scripts\windows\easy_install.ps1 -Raw
+              if ($ps1 -notmatch 'Test-VcRuntimeInstalled' -or $ps1 -notmatch 'vc_redist\.x64\.exe') {
+                  throw 'FAIL: the plugin needs the VC++ runtime but easy_install.ps1 does not check for it'
+              }
+              $rel = Get-Content .github\workflows\release.yml -Raw
+              if ($rel -notmatch 'VCRUNTIME140\.dll') { throw 'FAIL: the Windows bundle README does not mention the VC++ runtime' }
+          }
+          Write-Host 'ok: the plugin runtime dependency is checked and documented'

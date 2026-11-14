@@ -1,0 +1,755 @@
+<p align="center">
+  <img src="../FractalSQLforDuckDB.jpg" alt="FractalSQL for DuckDB" width="720">
+</p>
+
+# FractalSQL demo
+
+`demo.sql` is a runnable, five-minute walkthrough of search and
+reasoning in one script: Sniper Search, Scout Discovery, and LLM
+reasoning -- including Scout's output feeding straight into a reasoning
+call, which is the pattern the rest of the docs point at but don't show
+running end to end in one place. Text-to-SQL has its own walkthrough --
+see [Text-to-SQL](#text-to-sql) below.
+
+`response-modes.sql` is a companion script for `text` / `code` / `json`
+response modes -- see [Response modes](#response-modes) below for why
+it's a separate file from `demo.sql`.
+
+## Prerequisites
+
+1. **The extension is built and loaded.** If you haven't done this
+   yet, start with [../docs/getting-started.md](../docs/getting-started.md).
+   Side-loaded DuckDB extensions load per connection (there is no
+   `CREATE EXTENSION` step for a build like this one) -- every script
+   below assumes you pass the `LOAD` line first:
+
+   ```sh
+   { echo "LOAD '<path>/fractalsql.v1.5.6.<platform>.duckdb_extension';"; \
+     cat demo/demo.sql; } | duckdb -bail -unsigned mydb.duckdb
+   ```
+
+2. **Reasoning is configured.** Sections 0-2 of `demo.sql` only need the
+   extension itself, but sections 3-4 call `fractal_reason()`, which
+   needs a working LLM endpoint. Follow
+   [../docs/reasoning-setup.md](../docs/reasoning-setup.md) first --
+   Ollama, AWS Bedrock, Azure OpenAI, GCP Vertex, and any OpenAI-compatible
+   endpoint are all documented there. Configuration is process
+   environment in this build (`FSQL_REASONING_HTTP_URL` / `_MODEL`,
+   `FRACTALSQL_REASONING_PLUGIN` -- there is no `fractal_config_set()`
+   or config file to reload), so set it in the shell before starting the
+   `duckdb` process. Confirm it works before running this demo:
+
+   ```sql
+   SELECT fractal_reason('reply with a short confirmation that this connection works');
+   ```
+
+   If that errors, `demo.sql` will hit the same error at section 3 -- fix
+   it there first rather than debugging through the demo script.
+
+## Running it
+
+```sh
+FSQL_REASONING_HTTP_URL=http://127.0.0.1:11434/v1 \
+FSQL_REASONING_HTTP_MODEL=<your-model> \
+  { echo "LOAD '<path>/fractalsql.v1.5.6.<platform>.duckdb_extension';"; \
+    cat demo/demo.sql; } | duckdb -bail -unsigned mydb.duckdb
+```
+
+(Omit the env vars if reasoning isn't configured yet -- sections 0-2
+still run.) There is no in-demo timing line in this build (DuckDB's CLI
+has no per-statement timing dot-command; measure latency at the harness
+level, e.g.
+[demo-workload.sh](demo-workload.sh)) -- worth knowing that the reasoning
+calls (sections 3-4) are the slow part. A cloud endpoint typically
+responds in a few seconds; a local Ollama model can take much longer on a
+cold load (see "Slow or constrained hardware" in `reasoning-setup.md` if
+a call times out).
+
+The script is safe to re-run: `demo_alerts`, `demo_points`, and
+`demo_embeddings` are dropped and recreated at the start of their
+sections every time, so there's no stale-state cleanup to do between
+runs.
+
+## What each section shows
+
+- **0 -- Sanity check.** `fractal_edition()` / `fractal_version()`
+  confirm the extension is actually loaded before anything else runs.
+- **1 -- Setup.** A small `demo_alerts` table with a deliberate story in
+  it: a login-attempt count that escalates (3, 3, 17) and a latency
+  spike in the last ~10 minutes. Nothing here calls the LLM yet.
+- **2 -- Sniper Search.** `fractal_search(vec, query)` is the per-row
+  scalar over a stored column -- it converges each stored vector toward
+  the query point, and ordering a small corpus by it returns the closest
+  points. `fractal_search_debug` exposes the tunable abstract-space form
+  if you need it; the stored-column form here is fixed at the SFS
+  engine's own defaults.
+- **3 -- Reasoning over real data.** `fractal_reason()` gets a real
+  `context` argument this time -- the alerts from the last hour,
+  serialized to JSON via a subquery -- rather than an empty ping. Expect
+  the model to notice the login-attempt escalation and the latency
+  spike; exact wording varies by model and provider.
+- **4 -- Scout Discovery feeding reasoning.** `fractal_search_explore()`
+  is a table function here -- point it at your own embedding column and
+  it returns a diversity-spread population as rows, which are handed to
+  `fractal_reason()` as context in the same statement. This is the
+  differentiator pattern: diversity-sampled context instead of a plain
+  `WHERE` filter, in one pipeline.
+
+## Response modes
+
+`response-modes.sql` demonstrates `FSQL_REASONING_HTTP_RESPONSE_MODE`
+(`text` / `code` / `json`) -- see
+[docs/reasoning-setup.md](../docs/reasoning-setup.md#response-modes)
+for the full explanation.
+
+It's a **separate file from `demo.sql`**, not another section in it,
+because the response mode is env-var-only and read once when the
+reasoning plugin initializes -- changing it needs an OS-level
+environment change plus a fresh `duckdb` process. DuckDB is embedded (there
+is no separate server to restart), but a new `duckdb` session does not
+pick up the variable unless its own environment changed. Run it as three
+manual passes instead:
+
+1. Run `demo.sql` first if you haven't -- `response-modes.sql` reuses
+   its `demo_alerts` table.
+2. For each mode (`text` needs no setup -- it's the default):
+   1. Set `FSQL_REASONING_HTTP_RESPONSE_MODE` and start a fresh
+      `duckdb` process. See "Switching modes" in
+      [docs/reasoning-setup.md](../docs/reasoning-setup.md#response-modes)
+      for the exact commands on your platform (Windows/Linux/macOS
+      differ here).
+   2. Run only that section's query from `response-modes.sql` -- copy
+      it into the `duckdb` shell or pipe just that section in; not the
+      whole file.
+
+What to expect: `code` mode returns a bare SQL statement with no
+prose wrapper (no "Here's a query that does that:" preamble, no
+visible fence markers). `json` mode returns text checked structurally
+(balanced braces/brackets) on the plugin side: the plugin's own
+extraction and validation is the parse-proof here, and a successful
+`json`-mode result is evidence it worked, not just "looks like
+JSON."
+
+In the [Docker demo](../docs/docker-demo.md), skip the manual
+three-pass dance above: `run_demo.sh --include-response-modes` runs
+each mode as its own process with the right environment set,
+matching this procedure exactly.
+
+## FractalSQL Enterprise -- QTL & CISO Audit
+
+`enterprise-qtl-audit.sql` exercises the enterprise-tier **Quantized Ternary
+Ledger** (append-only, tamper-evident Truth/Shadow record of search/feedback
+events) and **CISO audit unpack** surface. Unlike every other demo here, it
+runs in **two** states:
+
+- **Dormant (default -- no enterprise artifact ships with this repo):**
+  the gated functions (`fractal_ledger_flush`/`_load`/`_compact`/
+  `_reset_soft`/`_reset_hard`/`_truth_count`/`_shadow_count` and
+  `fractal_audit_unpack`) are present but inactive. The demo seeds real
+  engagement events with the community `fractal_feedback_report()`
+  primitive, then each enterprise call fails with a clean
+  "requires the FractalSQL Enterprise tier" activation error. DuckDB has
+  no procedural SQL (no exception catching), so the error can't be caught
+  and summarized in one message -- under `-bail` the run stops at the
+  first gated call (the community seed steps before it still run); run it
+  without `-bail` and every gated call below prints its own copy of the
+  same error while the shell carries on. The community search engine is
+  unaffected either way.
+- **Active:** with `FRACTALSQL_ENTERPRISE_LIB` named in the environment
+  the `duckdb` process starts in (env config only in this build -- there
+  is no config function or config file to reload in an embedded engine), the demo flushes the
+  seeded ledgers to the in-memory QTL representation, decodes the QTL
+  blob back into a CISO event log, then exercises `load` / `compact` /
+  `reset_soft` / `reset_hard` end to end.
+
+```sh
+FRACTALSQL_ENTERPRISE_LIB=/path/to/libfractalsql-enterprise-sovereign-c.so \
+  { echo "LOAD '<path>/fractalsql.v1.5.6.<platform>.duckdb_extension';"; \
+    cat demo/enterprise-qtl-audit.sql; } | duckdb -unsigned mydb.duckdb
+```
+
+Omit the env var to see the dormant path. One durable-storage note before
+you run it: this build's ledger storage is **in-memory, per DuckDB
+connection** -- there is no `fractalsql_ledger`
+table, state is lost when the connection closes, and (flagged in the
+script's header) `fractal_audit_unpack` has no SQL-visible way to fetch
+the blob it expects, so the audit demo exercises 7 of the 8 gated
+functions and skips the decode step rather than faking it. See
+[docs/enterprise.md](../docs/enterprise.md) for the full mechanism, the
+function table, and the append-only chain details.
+
+### FractalSQL Enterprise -- Stress & Tamper-Evidence
+
+`enterprise-stress.sql` is the companion to the audit demo above: it
+hammers the same enterprise ledger surface under load. It fills the
+in-memory Truth/Shadow ledgers to their **capacity bound** (64 each,
+128 events total with disjoint doc_ids), churns 5 flush/load cycles at
+capacity, then builds an append-only chain and walks it with
+`fractal_ledger_verify()`. Tamper-evidence drills against a persisted
+ledger (truncating a persisted blob, byte-flipping a payload under an
+HMAC envelope, a middle-row tamper in the persisted table) have no
+surface in this build: the ledger is in-process, with no SQL-visible
+table and no blob accessor -- the script's header documents that gap
+and what a companion accessor would need to look like. Same
+dual-state shape as the audit demo: dormant runs (separate invocation,
+no env var) stop at the Phase A probe with the activation error; active
+runs drive every phase.
+
+> **Scope note:** the tamper-evidence story in this build is limited to
+> what the in-memory chain can prove: `fractal_ledger_verify()` (ungated
+> on this build) recomputes every chain link -- the
+> `{"ok": false, "first_failure_id": ...}` shape is real -- but nothing
+> on this build's SQL surface can corrupt the chain mid-run, and the
+> `enterprise_ledger_key` HMAC envelope
+> is **not implemented in this build**
+> ([docs/enterprise.md](../docs/enterprise.md) has the full not-list).
+>
+> **Concurrency / cross-session** coverage (parallel last-writer-wins
+> flush, load-in-a-fresh-connection) is exercised by the test
+> harness, which drives a real
+> enterprise core through a host language -- not something a single
+> CLI script can do (the database file is single-writer, and the ledger
+> context is per-connection in this build).
+
+```sh
+FRACTALSQL_ENTERPRISE_LIB=/path/to/libfractalsql-enterprise-sovereign-c.so \
+  { echo "LOAD '<path>/fractalsql.v1.5.6.<platform>.duckdb_extension';"; \
+    cat demo/enterprise-stress.sql; } | duckdb -unsigned mydb.duckdb
+```
+
+(No `-bail` here, same as the audit demo above: on a dormant (community)
+build each gated call prints its own activation error, and the shell
+should carry on to the next section.)
+
+## Text-to-SQL
+
+`demo-text-to-sql.sql` walks through `fractal_text_to_sql()` against
+a richer three-table schema with real foreign keys (`customers` ->
+`orders` -> `order_items`) -- single-table questions, a question
+requiring a join, and a question requiring all three tables, plus
+capturing and running a generated statement yourself. This build's
+`fractal_text_to_sql(question, table_names)` takes the question plus an
+optional list-valued table-scoping argument. The
+generated statement is never executed; validated SQL comes back as text.
+Same prerequisites as `demo.sql` (extension loaded, reasoning
+configured). Full pipeline explanation, the allowlist environment
+variable (`FSQL_TEXT_TO_SQL_ALLOWED_STATEMENTS` -- statement-type gating
+by env, not a SQL-visible setting), and the application-layer
+access-control pattern (this
+build has no roles/GRANT) are in
+[docs/text-to-sql-setup.md](../docs/text-to-sql-setup.md).
+
+```sh
+{ echo "LOAD '<path>/fractalsql.v1.5.6.<platform>.duckdb_extension';"; \
+  cat demo/demo-text-to-sql.sql; } | duckdb -bail -unsigned mydb.duckdb
+```
+
+`demo/text-to-sql-spike-*.sql` is a step-by-step manual walkthrough of
+the text-to-SQL stages (single table, no foreign keys, driving
+`fractal_reason()` directly: generate, review, validate, negative
+control) -- useful for seeing each stage on its own; the recommended
+starting point is `demo-text-to-sql.sql`.
+
+## Industry vertical demos
+
+Forty-two runnable walkthroughs -- twenty-seven **domain kits** and fifteen
+**agentic verticals** -- each with its own synthetic dataset and its own
+subset of the function surface chosen for genuine domain fit, not forced
+coverage. Every reasoning-bearing one ends with a `fractal_reason()`
+narrative call over real computed results, same closing pattern as
+`demo.sql` (the two newest verticals, Biotech/Genomics and Agentic Edge
+Swarm, are raw-primitive showcases and run with no reasoning endpoint at
+all). Same prerequisites as `demo.sql` (extension loaded; the final
+reasoning section in each needs
+[reasoning configured](../docs/reasoning-setup.md) -- every earlier
+section runs without it). All forty-two ship alongside the other demo
+scripts in this directory, and are wired into the step-by-step
+walk-through in
+[docs/docker-demo.md](../docs/docker-demo.md)'s Learning Path,
+including `run_demo.sh` to run all forty-two (plus every other demo in
+this directory) in one pass instead of one invocation per file.
+Five (MedTech, Maritime, Fleet, Cybersecurity, Biotech/Genomics) store
+their vector columns as plain **`float8[]`** lists -- width pinned by
+construction (this build has no bespoke catalog type; DuckDB's own
+list/array types and the demos'
+by-construction width pinning cover it -- see the storage note in
+[docs/features.md](../docs/features.md#storage-double-vs-float)).
+
+```sh
+{ echo "LOAD '<path>/fractalsql.v1.5.6.<platform>.duckdb_extension';"; \
+  cat demo/demo-vertical-quant-finance.sql; } | duckdb -bail -unsigned mydb.duckdb
+```
+
+- **[demo-vertical-quant-finance.sql](demo-vertical-quant-finance.sql)** --
+  Quantitative Finance & Algorithmic Trading. A 25-asset factor-model
+  portfolio (`fractal_optimize_portfolio` picks the best 8) and a
+  300-point price series with a deliberate volatility regime change at
+  t=240 (`fractal_dimension_dfa`/`fractal_dimension_drift`, with
+  `fractal_change_point_detect` localizing the boundary).
+  `fractal_search_trajectory` finds which of 10 historical quarterly
+  rebalances the new allocation most resembles.
+- **[demo-vertical-medtech-clinical.sql](demo-vertical-medtech-clinical.sql)** --
+  MedTech, Clinical Telemetry & Patient Monitoring. 40 synthetic
+  patients, `vitals` stored as **`float8[]`** (five-dim, width pinned by
+  construction -- no bespoke catalog type here) -- a fixed five-field
+  clinical vector where dimension-drift protection actually matters:
+  `fractal_hybrid_clinical_search` over an age/condition cohort computed
+  with ordinary SQL, `fractal_search_trajectory` for a patient's current
+  vitals vs. their own admission baseline (the exact example in that
+  function's own doc comment), plus the domain-geometry functions
+  (`fractal_vascular_network`, `fractal_cortical_folding`,
+  `fractal_nerve_plexus_metric`, `fractal_morphological_complexity`) on
+  small, pre-extracted geometric fixtures -- a vessel graph, a reference
+  unit-cube mesh, a nerve fiber skeleton.
+- **[demo-vertical-recommendation-search.sql](demo-vertical-recommendation-search.sql)** --
+  Advanced Recommendation, Search & Discovery Engines. A 300-item, 6-genre
+  catalog for diverse "you might also like" discovery
+  (`fractal_search_explore`), table-backed top-k
+  (`fractal_search_telemetry`), and the **full stateful-diversity
+  loop**: enable Diversify, search, report negative feedback on the
+  top result, re-search the same query, confirm it's now avoided -- the
+  real differentiator over plain top-K or MMR, neither of which is
+  stateful across searches. Also covers `fractal_cross_modal_search`
+  (content + behavior vectors, weighted).
+- **[demo-vertical-sovereign-edge-ai.sql](demo-vertical-sovereign-edge-ai.sql)** --
+  Sovereign, Edge & Autonomous Systems AI. FractalSQL's whole story fits
+  this vertical natively -- search, reasoning, and optimization all run
+  as pure C inside the same process as the database itself, no external
+  vector-DB service required. A 50-node edge-compute fleet: Sniper
+  Search for an ideal node profile (with `fractal_search_debug`
+  refining it -- the tunable abstract-space form), Scout Discovery for
+  diverse fleet profiles, `fractal_dimension_boxcount` over a facility
+  deployment grid, and `fractal_optimize_portfolio` repurposed as a
+  general on-device black-box resource allocator (picking 6-of-50 nodes
+  for a distributed job under contention risk).
+- **[demo-vertical-maritime-defense.sql](demo-vertical-maritime-defense.sql)** --
+  Maritime, Aviation & Defense (AIS & Radar Tracking). 30 synthetic AIS
+  vessel tracks (`baseline`/`current` stored as **`float8[]`**, a fixed
+  four-field track-state vector), one given a deliberate course
+  deviation. `fractal_search_trajectory` on the current-vs-baseline
+  track delta (a direct fit for "what changed" deviation detection),
+  nearest-track/diverse-track clustering across the fleet, and
+  `fractal_dimension_dfa` on heading-change series to separate smooth
+  transit from erratic maneuvering.
+- **[demo-vertical-fleet-logistics.sql](demo-vertical-fleet-logistics.sql)** --
+  Autonomous Fleet Management & Last-Mile Delivery. A 40-vehicle
+  delivery fleet (`baseline`/`current` stored as **`float8[]`**),
+  one running a deliberate detour. Diverse route/zone clustering for
+  depot coverage, a cohort-restricted search ("today's route-3 vehicles
+  only" -- the same cohort-then-search composition
+  `fractal_hybrid_clinical_search` uses, built here with an ordinary
+  filtered temp table instead of that clinically-named function),
+  detour detection via `fractal_search_trajectory`, and GPS-trace
+  complexity via `fractal_dimension_boxcount`.
+- **[demo-vertical-smart-cities-iot.sql](demo-vertical-smart-cities-iot.sql)** --
+  Smart Cities & IoT Sensor Grids. A 400-sensor city grid
+  (traffic/air-quality/noise): spatial coverage diagnostics
+  (`fractal_dimension_boxcount`/`fractal_morphological_complexity`),
+  an air-quality event detected via `fractal_dimension_dfa`/
+  `fractal_dimension_drift` on a sensor series with a deliberate
+  regime shift, and diverse representative-zone sampling via Scout
+  Discovery.
+- **[demo-vertical-cybersecurity-threat-detection.sql](demo-vertical-cybersecurity-threat-detection.sql)** --
+  Cybersecurity & Threat Detection (network behavior analytics). A
+  35-host fleet across three zones (`baseline`/`current` stored as
+  **`float8[]`**), one host showing a stealthy compromise
+  pattern -- outbound connections, destination ports, and DNS query
+  volume all spike while failed-auth stays flat, not a brute-force
+  signature. Diverse traffic-profile clustering for threat hunting
+  (`fractal_search_explore`), a zone-restricted search ("DMZ hosts
+  only" -- the same cohort-then-search composition
+  `fractal_hybrid_clinical_search` uses), compromise detection via
+  `fractal_search_trajectory`, and connection-rate regime-change
+  detection via `fractal_dimension_dfa`/`fractal_dimension_drift` on a
+  beaconing-onset series, with `fractal_periodogram` reading the beacon
+  interval itself out of the post-shift traffic.
+- **[demo-vertical-biotech-genomics.sql](demo-vertical-biotech-genomics.sql)** --
+  Structural Biology & Genomics. A synthetic scRNA-seq-style embedding
+  in 3D -- 22 points in two well-separated clusters (8 + 8) plus 6
+  points bridging them in a rough ring -- analyzed by
+  `fractal_tda_persistence_diagram`: exact 0-dim persistence
+  (cluster birth/death bars) plus the graph-cycle-rank Betti-1, which
+  flags the closed loop the shape actually has. Then
+  `fractal_vector_lp_distance` between the two cluster centroids,
+  contrasting p=1 Manhattan (robust to per-feature outliers) against
+  p=2 Euclidean. A raw-primitive showcase -- no reasoning endpoint
+  needed.
+- **[demo-vertical-agentic-edge-swarm.sql](demo-vertical-agentic-edge-swarm.sql)** --
+  Agentic Edge / Robotics Swarm Coordination. A battery- and
+  bandwidth-constrained 20-node edge swarm: `fractal_vector_quantize_int8`
+  (4x) and `_quantize_binary` (32x) for compressed peer-state memory
+  with `fractal_vector_hamming_distance` as the cheap candidate filter
+  ahead of a full-precision re-rank, `fractal_agent_detect_loop` on a
+  node stuck oscillating between two headings vs. one genuinely
+  exploring (deterministic multi-frequency sinusoids -- the negative
+  control that must NOT be flagged), and `fractal_optimize_subset`'s
+  value-weighted allocation for battery-constrained task routing. Raw
+  primitives and shipped presets only, no reasoning endpoint needed.
+
+### Agentic verticals (Universal Agent composition)
+
+The three agentic verticals exercise the six C-level **Universal Agents**
+composed into **Domain Agent** compositions -- see
+[docs/api-agency.md](../docs/api-agency.md) for the full registry and the
+composition pattern. Unlike the domain verticals above, most sections
+here need reasoning configured (the agents call
+`fractal_reason`/`fractal_embed`) -- a call without it fails with the
+clean "not configured" hint, and the raw-primitive sections still run
+either way. Each is a clean, re-runnable regression test of a
+recently-fixed agent code path -- nothing commented out, no skip-wrappers
+(DuckDB has no procedural SQL, so there's no `DO`/`EXCEPTION` block to
+skip with).
+
+- **[demo-vertical-agentic-ops-devops.sql](demo-vertical-agentic-ops-devops.sql)** --
+  DevOps/SRE: Autonomous Incident Triage & Self-Healing. The
+  embed-coupled agents on a vectorized `incident_logs` corpus:
+  `fractal_search_agent` and `fractal_rag_agent` (retrieve-then-reason),
+  both gated on the reasoning plugin -- a clean hint without one, and
+  the analytic sections still run either way --
+
+  `fractal_agent_detect_loop` on a period-2 oscillation in a
+  state-vector log (the SimHash + Brent cycle detector flags the
+  2-state cycle even though its DFA alpha is only ~0.04),
+  `fractal_dimension_drift` over a non-degenerate latency series, the
+  route-task queue-drain loop (`fractal_agent_route_task` re-scored
+  pass by pass as tasks complete), plus `fractal_agent_outlier_intercept`
+  and `fractal_agent_anomaly_triage` Domain Agent compositions.
+- **[demo-vertical-agentic-fintech-mcts.sql](demo-vertical-agentic-fintech-mcts.sql)** --
+  FinTech: Scenario Exploration & Safe Execution. `fractal_agent_plan_explore`
+  embeds a seed state and Scout-searches a vectorized `trade_strategies`
+  corpus (reasoning-plugin gated, like every cognition agent),
+  `fractal_sql_agent` with auto_execute set (positional, `true`) running
+  the model-generated SQL in-process (a thrown execution error is
+  captured into `execution_status='execution_failed'` rather than
+  propagated to abort the call), and `fractal_optimize_portfolio`
+  rebalancing against `historical_allocations`.
+- **[demo-vertical-agentic-customer-support.sql](demo-vertical-agentic-customer-support.sql)** --
+  Customer Support: Stateful Session & Churn Drift.
+  `fractal_agent_trajectory_predict` reads the baseline vector (by rowid)
+  and the latest vector (max rowid) from a native `float8[]`
+  `state_vector` column, derives the dimension from the data, and
+  computes a real delta -- plus `fractal_agent_recall_hybrid`,
+  `fractal_agent_recommend_diverse`, and the `fractal_diversify_enable`
+  stateful-diversity loop.
+
+
+### Newer verticals (automotive, aerospace, telecom, climate tech, RF)
+
+- **[demo-vertical-ev-battery-lifecycle.sql](demo-vertical-ev-battery-lifecycle.sql)** —
+  EV Battery Lifecycle (agentic kit). 3 vehicles x 96 readings (state of health, pack temperature, cell voltage); one vehicle develops an accelerating thermal ramp and SoH fade. Chains `fractal_agent_patient_deterioration_triage` (cohort search plus baseline-vs-current trajectory drift: a vehicle's intake baseline plays the patient's admission baseline) with `fractal_agent_anomaly_triage` (the DFA drift exponent of the temperature series), each shown hand-composed first and then as the shipped one-call agent, closing with one maintenance / safety recommendation.
+- **[demo-vertical-adas-safety-validation.sql](demo-vertical-adas-safety-validation.sql)** —
+  ADAS Safety Validation (agentic kit). A pre-commit safety barrier. `fractal_agent_outlier_intercept` screens three proposed maneuvers against a history of known-bad states (cosine by default, exact Euclidean when magnitude should count: a gentle lane change is intercepted by cosine but allowed by l2), and `fractal_search_trajectory` flags a vehicle whose routing vector has strayed from the fleet baseline. Closes with one go / no-go verdict.
+- **[demo-vertical-v2x-warranty-triage.sql](demo-vertical-v2x-warranty-triage.sql)** —
+  V2X Warranty Triage (agentic kit). Routes an incoming diagnostic-trouble-code event to the best-capable repair workflow under a token budget (`fractal_agent_route_task`), then recalls similar historical warranty claims with a strict metadata filter (`fractal_agent_recall_hybrid`; a two-predicate model-year-and-component cohort is shown with `fractal_hybrid_clinical_search`). Closes with a dispatch + claim-context summary.
+- **[demo-vertical-critical-inventory-routing.sql](demo-vertical-critical-inventory-routing.sql)** —
+  Critical Inventory Routing (agentic kit). Six depots x 64 days of consumption. `fractal_dimension_dfa` finds the depot whose demand is accelerating (non-linear) rather than merely high; `fractal_optimize_portfolio` picks which 3 depots get the scheduled replenishment run with the risk matrix inflated by the DFA exponent; the bursty depot is flagged for expedited restock instead. `fractal_agent_allocate` is the shipped one-call form of the optimizer step. Closes with the rebalancing rationale.
+- **[demo-vertical-heavy-industry-predictive-maintenance.sql](demo-vertical-heavy-industry-predictive-maintenance.sql)** —
+  Heavy-Industry Predictive Maintenance (agentic kit). Four pumps and drives x 96 readings; one pump develops an accelerating bearing-vibration defect. `fractal_agent_anomaly_triage` flags the vibration regime shift and `fractal_agent_patient_deterioration_triage` measures drift from the asset's intake baseline with a same-class cohort search (an asset plays the patient). Closes with a maintenance-window recommendation. This is the wear / lifecycle half of heavy-industry monitoring.
+- **[demo-vertical-climatech-grid-balancing.sql](demo-vertical-climatech-grid-balancing.sql)** —
+  Climate Tech: Grid Balancing (agentic kit). Grid-frequency telemetry for three balancing areas; one loses damping and its oscillation envelope grows. `fractal_dimension_drift` (the volatility-regime recipe from the quant-finance kit, applied to a grid) detects it, and `fractal_optimize_portfolio` chooses the 4 of 6 generation and storage resources that carry the response, with a ramp-risk matrix in which solar and wind share weather risk. `fractal_agent_anomaly_triage` and `fractal_agent_allocate` are the shipped one-call forms. Closes with the dispatch-plan rationale.
+- **[demo-vertical-hazmat-occupational-triage.sql](demo-vertical-hazmat-occupational-triage.sql)** —
+  Hazmat / Occupational Exposure (domain kit). 36 workers across work zones and shifts; a reactor-bay night-shift crew shows elevated dose rate, temperature and heart rate. `fractal_agent_patient_deterioration_triage` is reused verbatim (cohort search plus baseline-vs-current drift, with exposure columns in place of clinical vitals). Closes with a medical-countermeasure dispatch recommendation.
+- **[demo-vertical-scenario-planning-simulation.sql](demo-vertical-scenario-planning-simulation.sql)** —
+  Scenario Planning & Simulation (domain kit). 24 candidate continuity scenarios in four clusters. Scout (`fractal_search_explore`) picks six deliberately different ones with no model; `fractal_agent_plan_explore` (MCTS-style exploration, needs an embedding endpoint) generates scenario variants from a seed state description. Closes with a summary of the scenario set.
+- **[demo-vertical-avionics-fault-prediction.sql](demo-vertical-avionics-fault-prediction.sql)** —
+  Avionics Fault Prediction (domain kit). A 12-aircraft fleet with planned-path and current-state vectors in 3D; one flight has drifted far off plan and has erratic heading changes. `fractal_agent_track_anomaly` generalizes straight from the maritime kit's 2D tracks to 3D flight paths (trajectory deviation search plus the heading-change DFA exponent). Closes with a reasoned classification of the deviation.
+- **[demo-vertical-satellite-constellation-coverage.sql](demo-vertical-satellite-constellation-coverage.sql)** —
+  Satellite Constellation Coverage (domain kit). A 20 x 20 footprint lattice, healthy vs a copy missing an 8 x 8 dead zone (the gap raises lacunarity). `fractal_agent_network_coverage_alert` combines the footprint morphology with link-quality telemetry drift; `fractal_agent_schedule_workload` models launch-slot scheduling for the replacement payload. Coverage-gap angle only: orbital drift and collision detection are a different problem.
+- **[demo-vertical-telecom-account-anomaly-screening.sql](demo-vertical-telecom-account-anomaly-screening.sql)** —
+  Telecom Account-Anomaly Screening (domain kit). Screens proposed account changes (SIM swap, port-out, new device, location jump) against a history of known-anomalous patterns with `fractal_agent_outlier_intercept`, reused verbatim: the same shape as the ADAS kit. Shows cosine (shape of the event) against exact Euclidean (intensity counts). A general pre-commit safety check, not a fraud-specific product.
+- **[demo-vertical-telecom-traffic-routing.sql](demo-vertical-telecom-traffic-routing.sql)** —
+  Telecom Traffic Routing (domain kit). Five session requests dispatched to the best-capable of four network nodes under a token budget with `fractal_agent_route_task`, reused verbatim; then re-routed over only the nodes with headroom so a loaded node's request is re-homed. Nearest-capable-node dispatch, not multi-hop rerouting around a failed node.
+- **[demo-vertical-climatech-emissions-monitoring.sql](demo-vertical-climatech-emissions-monitoring.sql)** —
+  Climate Tech: Emissions Monitoring (domain kit). Methane, CO2 and pipeline-pressure sensors; one methane sensor starts leaking (an accelerating concentration ramp). `fractal_agent_anomaly_triage` is reused verbatim to flag the shift into a leak regime; the same call screens a water-distribution pressure series. Closes with a leak narrative and field response.
+- **[demo-vertical-climatech-risk-exposure.sql](demo-vertical-climatech-risk-exposure.sql)** —
+  Climate Tech: Risk Exposure (domain kit). A 20 x 20 hazard-sensor grid with dry-season and wet-season fuel-moisture deficit indices. `fractal_agent_network_coverage_alert` is reused verbatim: morphology of the elevated-hazard region plus telemetry drift, shaped like the smart-cities kit's sensor grid. Closes with an exposure narrative for an insured portfolio.
+- **[demo-vertical-rf-spectrum-sensing.sql](demo-vertical-rf-spectrum-sensing.sql)** —
+  RF Spectrum Sensing (domain kit). Three channels x 256 samples: a beacon that gets jammed partway through, an empty noise channel and a steady carrier. `fractal_periodogram` says which frequencies dominate, the new `fractal_spectrogram_entropy` says how ordered the spectrum is window by window, and `fractal_change_point_detect` localizes when the order was lost, straight from the entropy series. A raw-primitive showcase: no agents and no model until the closing triage narrative.
+
+
+### Event-stream, document, spatial and allocation kits
+
+- **[demo-vertical-event-stream-anomaly-triage.sql](demo-vertical-event-stream-anomaly-triage.sql)** —
+  Event-Stream Anomaly Triage (domain kit). Four endpoints x 96 one-minute intervals of request latency; one endpoint (EP-C) develops an accelerating latency ramp (a timeout cascade) and a second (EP-B) has a retry-storm oscillation in its request rate. `fractal_agent_anomaly_triage` flags the latency regime shift, `fractal_periodogram` finds the retry-storm period, and `fractal_search_trajectory` finds which endpoints' success-rate / latency / timeout / fill health has moved the same way EP-C's did.
+- **[demo-vertical-outlier-interception-footprint.sql](demo-vertical-outlier-interception-footprint.sql)** —
+  Outlier Interception & Footprint Analysis (domain kit). Screens proposed traffic sessions against a history of known-abuse signatures with `fractal_agent_outlier_intercept` (cosine by default, exact Euclidean when magnitude should count), then uses `fractal_dimension_boxcount` on click-coordinate clouds: organic traffic fills the page (a high box-counting dimension) while an automated farm hammering a handful of targets collapses onto a line (a dimension near 1).
+- **[demo-vertical-agentic-budget-reallocation.sql](demo-vertical-agentic-budget-reallocation.sql)** —
+  Agentic Budget Reallocation (agentic kit). Six channels x 64 days of attributed outcomes. `fractal_dimension_dfa` finds the channel whose response is accelerating (a non-linear surge a plain average would hide); `fractal_optimize_portfolio` picks which 3 channels receive the scheduled budget increase with the risk matrix inflated by the DFA exponent; the surging channel is flagged for a capped, monitored test instead. `fractal_agent_allocate` is the shipped one-call form of the optimizer step, and `fractal_agent_route_task` dispatches each journey to the best-matching model under a token budget.
+- **[demo-vertical-stalled-process-triage.sql](demo-vertical-stalled-process-triage.sql)** —
+  Stalled-Process Triage (domain kit). 36 open items across segments and stages; three tier-1 items in the review stage show the same stall signature (time-in-stage far above the healthy velocity, falling engagement, a silent owner, deepening concessions). `fractal_agent_patient_deterioration_triage` is reused verbatim (cohort search plus baseline-vs-current drift, with item-health columns in place of clinical vitals): an item's stage-entry telemetry plays the patient's admission baseline.
+- **[demo-vertical-intent-matching-discovery.sql](demo-vertical-intent-matching-discovery.sql)** —
+  Intent Matching & Diverse Selection (domain kit). 24 target entities in four intent clusters (category + stage signal vectors) and a 30-item content library. Scout (`fractal_search_explore`, the diversity-first MMR search) picks six deliberately different entities around a target profile instead of six near-duplicates, and `fractal_agent_recommend_diverse` returns a repulsion-diverse set of content items for the chosen entity: no model needed for either.
+- **[demo-vertical-agentic-next-action-ranking.sql](demo-vertical-agentic-next-action-ranking.sql)** —
+  Agentic Ranking & Next-Action Recommendation (agentic kit). 30 candidates across segments, a 12-item action catalog and a natural-language question over the candidate table. `fractal_agent_recall_hybrid` recalls the most similar past candidates inside one segment (a strict metadata filter), `fractal_agent_recommend_diverse` proposes a diverse set of next actions (not four variations of 'send an email'), and `fractal_sql_agent` answers a status question in plain English by generating and running the SQL.
+- **[demo-vertical-document-risk-drift.sql](demo-vertical-document-risk-drift.sql)** —
+  Document Risk Drift & Diverse Alternatives (domain kit). Four agreements x 96 weekly clause-risk reviews; one agreement's amended terms drift into a new regime (an accelerating risk creep). `fractal_dimension_drift` (the regime-detection recipe from the quant-finance kit, applied to document risk) finds it; Scout (`fractal_search_explore`) pulls six deliberately different clause variants out of the 24-clause corpus so the reviewer sees the spread rather than six near-copies; and `fractal_agent_recommend_diverse` proposes diverse approved replacement language.
+- **[demo-vertical-coordinated-record-detection.sql](demo-vertical-coordinated-record-detection.sql)** —
+  Record Clustering & Severity Trajectory (domain kit). A review desk screens new submissions against known ring signatures with `fractal_agent_outlier_intercept`, finds the records that moved from the normal severity baseline the way a staged ring does with `fractal_search_trajectory`, and measures the geographic footprint of event locations with `fractal_dimension_boxcount` (organic events scatter across the city; a staged ring repeats along one road).
+- **[demo-vertical-sensor-telemetry-allocation.sql](demo-vertical-sensor-telemetry-allocation.sql)** —
+  Sensor Telemetry & Resource Allocation (agentic kit). Six sites x 64 days of resource demand from soil-moisture sensors. `fractal_dimension_dfa` finds the site whose demand is accelerating (a non-linear trend or a failing supply line) rather than merely high; `fractal_optimize_portfolio` picks which 3 sites get the scheduled service run with the risk matrix inflated by the DFA exponent; the accelerating site is flagged for an inspection instead. `fractal_agent_allocate` is the shipped one-call form of the optimizer step.
+- **[demo-vertical-simulated-economy-drift.sql](demo-vertical-simulated-economy-drift.sql)** —
+  Simulated-Economy Drift & Loop Detection (agentic kit). Six markets x 96 days of price index; every market carries a weekly demand cycle, and one (mkt-d) enters an accelerating inflation spiral. `fractal_periodogram` confirms the weekly cycle, `fractal_dimension_dfa` flags the market that is inflating non-linearly, and `fractal_optimize_portfolio` picks the 3 markets for the scheduled sink program (the inflating market goes to an emergency price-cap instead). `fractal_agent_detect_loop` then watches trade-state logs: an automated actor that flips between the same two item states is detected while a varied actor is not.
+- **[demo-vertical-multi-series-replenishment.sql](demo-vertical-multi-series-replenishment.sql)** —
+  Multi-Series Forecasting & Replenishment (agentic kit). Six locations x 64 days of unit demand. `fractal_dimension_dfa` finds the location whose demand is accelerating (a viral item or a local event) rather than merely high; `fractal_optimize_portfolio` picks which 3 locations get the scheduled replenishment from the central hub with the risk matrix inflated by the DFA exponent; the surging location is flagged for an expedited pick instead. `fractal_agent_allocate` is the shipped one-call form of the optimizer step.
+- **[demo-vertical-periodicity-portfolio-selection.sql](demo-vertical-periodicity-portfolio-selection.sql)** —
+  Periodicity Detection & Portfolio Selection (domain kit). Six items x 96 days of sales velocity with a weekly demand cycle of differing strength. `fractal_periodogram` quantifies which items are genuinely periodic; `fractal_optimize_portfolio` picks the 3 items that get the scheduled action (a Sharpe-style trade of margin recovered against demand volatility); `fractal_agent_recommend_diverse` proposes a diverse set of substitute items. On the FractalSQL Enterprise edition `fractal_agent_diverse_portfolios` (multimodal optimization) also returns structurally different schedules; on the FractalSQL Community edition that step reports "enterprise tier not loaded".
+- **[demo-vertical-agentic-recall-recommendation.sql](demo-vertical-agentic-recall-recommendation.sql)** —
+  Agentic Recall & Diverse Recommendation (agentic kit). 24 candidate offers in four clusters and 30 abandoned sessions across categories. Scout (`fractal_search_explore`) picks six deliberately different offers around the user's profile so the follow-up tests variety rather than six near-identical offers; `fractal_agent_recall_hybrid` recalls the most similar past sessions inside the user's category (a strict metadata filter); and `fractal_sql_agent` answers a question over the session table in plain English.
+- **[demo-vertical-spatial-footprint-portfolio-risk.sql](demo-vertical-spatial-footprint-portfolio-risk.sql)** —
+  Spatial Footprint Complexity & Portfolio Risk (domain kit). Three districts' parcel footprints (a dense grid, a single arterial strip and a two-corridor district) measured with `fractal_dimension_boxcount`: the lower the dimension the more linear the frontage and the more a valuation depends on a few corridors. Six asset classes x 64 months of index values feed `fractal_dimension_dfa` and `fractal_optimize_portfolio` (pick 3 classes for the renewal push; the accelerating one is flagged), and Scout (`fractal_search_explore`) selects six deliberately different comparable parcels so the reviewer sees the spread of the market, not six near-twins.
+**A note on `fractal_dimension_boxcount`/`fractal_morphological_complexity`
+fixture design**, visible across several of the scripts above: both
+functions need enough *space-filling* points (a grid, a path, a real
+geometric structure) for their internal box-counting estimator to find
+>= 3 valid eps-octaves -- its own documented validity filter. A sparse
+or purely random scatter of points, even well past the 8-point
+minimum, typically fails this and returns an error rather than a wrong
+number. Every fixture above was chosen and verified against a live
+instance with that requirement in mind.
+
+## The sixteen agents
+
+`demo-agents.sql` validates the sixteen agents. They all ship in the
+main extension:
+The extension registers all sixteen
+as native DuckDB scalar functions, next to the six
+Universal Agents, the reasoning core, and the search core -- no separate
+install step. Load the extension once and all sixteen are already there
+(see
+[docs/api-agency.md](../docs/api-agency.md#which-agent-should-i-use)).
+The demo exercises all sixteen end to end:
+
+- **`fractal_agent_anomaly_triage`** -- over a drifting latency series (real
+  `fractal_dimension_drift` -> real `fractal_reason`).
+- **`fractal_agent_allocate`** -- on a real `mu`/`cov` (real
+  `fractal_optimize_portfolio` -> real `fractal_reason`).
+- **`fractal_agent_route_task`** -- matches a task embedding to the nearest
+  capability row (real `fractal_search_telemetry` -> real `fractal_reason`).
+- **`fractal_agent_outlier_intercept`** -- screens a state vector against known
+  bad states and compares the real nearest-distance to a threshold (real
+  `fractal_search_telemetry` -> real `fractal_reason`).
+- **`fractal_agent_recall_hybrid`** -- vector recall restricted by a metadata
+  cohort (real `fractal_hybrid_clinical_search`); pure retrieval, no LLM step.
+- **`fractal_agent_recommend_diverse`** -- repulsion-diverse top-k over a catalog
+  (real `fractal_diversify_enable` + real `fractal_search_telemetry`); pure
+  retrieval, no LLM step.
+- **`fractal_agent_data_analyst`** -- a natural-language question over your
+  tables (real `fractal_sql_agent` with auto_execute set (positional,
+  `true`) -> real `fractal_reason`); the horizontal catch-all with no
+  vertical preset.
+- **`fractal_agent_patient_deterioration_triage`** -- cohort-restricted
+  nearest patient + baseline-to-current drift (real
+  `fractal_hybrid_clinical_search` + real `fractal_search_trajectory` -> real
+  `fractal_reason`); the cohort is caller-built so `age>65 AND
+  condition='sepsis'` composes in ordinary SQL.
+- **`fractal_agent_feedback_audit`** -- a self-contained diversify/repulsion
+  audit cycle (real `fractal_detect_collapse` + real `fractal_explain_result`);
+  pure analytics, **no LLM**, self-disables diversify.
+- **`fractal_agent_schedule_workload`** -- refines a task vector then finds
+  the nearest node (real `fractal_search` + real `fractal_search_telemetry` ->
+  real `fractal_reason`).
+- **`fractal_agent_rebalance_sibling`** -- optimized book vs nearest
+  historical allocation (real `fractal_optimize_portfolio` + real
+  `fractal_search_trajectory` -> real `fractal_reason`).
+- **`fractal_agent_diverse_portfolios`** -- enterprise tier; companion to
+  `fractal_agent_allocate` returning several structurally distinct good
+  portfolios instead of one (composes the enterprise-gated
+  `fractal_optimize_portfolio_multimodal` variants ->
+  `fractal_reason`); dormant on community builds -- the call errors with
+  the clean activation hint; DuckDB SQL has no exception handling, so
+  run this demo without `-bail` and the shell carries on to the next
+  section.
+- **`fractal_agent_detour_classify`** -- route deviation + GPS-trace
+  complexity (real `fractal_search_trajectory` + real
+  `fractal_dimension_boxcount` -> real `fractal_reason`).
+- **`fractal_agent_track_anomaly`** -- track deviation + heading DFA (real
+  `fractal_search_trajectory` + real `fractal_dimension_dfa` ->
+  `fractal_reason`).
+- **`fractal_agent_network_coverage_alert`** -- sensor-grid morphology +
+  telemetry drift (real `fractal_morphological_complexity` + real
+  `fractal_dimension_drift` -> `fractal_reason`); 20x20 grid (400 pts).
+- **`fractal_agent_regime_triage`** -- single-series regime change (real
+  `fractal_dimension_dfa` + real `fractal_dimension_drift` ->
+  `fractal_reason`).
+
+Thirteen agents are cognition (their JSON includes a `rationale` produced
+by `fractal_reason`); three are pure retrieval/analytics with no endpoint
+needed (`recall_hybrid`, `recommend_diverse`, `feedback_audit`). The
+script closes with a `fractal_reason()` narrative over the computed
+results -- same closing pattern as every other demo.
+
+**Prerequisites:** the base extension plus reasoning (same as `demo.sql`)
+-- the agents register with the extension itself, nothing extra to install:
+
+```sh
+{ echo "LOAD '<path>/fractalsql.v1.5.6.<platform>.duckdb_extension';"; \
+  cat demo/demo-agents.sql; } | duckdb -unsigned mydb.duckdb
+```
+
+(No `-bail` here: the enterprise-tier `fractal_agent_diverse_portfolios`
+call surfaces its clean activation error on a community run and the
+shell carries on to the next section.)
+
+The script is safe to re-run: `agents_demo_logs` and the agent fixture
+tables (`agents_demo_caps`, `agents_demo_badstates`, `agents_demo_mem`,
+`agents_demo_catalog`, `agents_demo_data`, `agents_demo_patients`,
+`agents_demo_fcatalog`/`agents_demo_fwarmup`, `agents_demo_nodes`,
+`agents_demo_alloc`, `agents_demo_vehicles`, `agents_demo_tracks`) are
+dropped and recreated at the top of their sections. The ten
+non-agentic vertical demos (`demo-vertical-quant-finance.sql`,
+`demo-vertical-medtech-clinical.sql`, `demo-vertical-recommendation-search.sql`,
+`demo-vertical-sovereign-edge-ai.sql`, `demo-vertical-maritime-defense.sql`,
+`demo-vertical-fleet-logistics.sql`, `demo-vertical-smart-cities-iot.sql`,
+`demo-vertical-cybersecurity-threat-detection.sql`,
+`demo-vertical-biotech-genomics.sql`, `demo-vertical-agentic-edge-swarm.sql`) are
+likewise now **presets** -- each rewired section keeps its raw-primitive
+call as a commented blueprint above the shipped agent call that
+generalizes it (the 3 agentic vertical files --
+`demo-vertical-agentic-ops-devops.sql`,
+`demo-vertical-agentic-fintech-mcts.sql`,
+`demo-vertical-agentic-customer-support.sql` -- exercise the Universal
+and Domain Agent compositions directly and stay as they are).
+The agents are ordinary functions in the loaded extension, so there's
+nothing separate to drop -- dropping the demo tables (see
+[Cleanup](#cleanup)) is all the teardown there is.
+
+## Full API benchmark
+
+`benchmark-api-reference.sql` is a pass exercising the callable
+functions of this build's extension surface, grouped by category,
+against small generated fixtures -- a correctness-plus-latency smoke
+pass over the whole API surface, distinct from
+[`benchmark.sql`](benchmark.sql)'s narrower Sniper-Search/Scout-
+Discovery/vectorizer-throughput comparison (which stays scoped to that,
+see its own header comment). There is no safe-wrapper function here
+(DuckDB has no procedural SQL to write one in): reasoning-dependent
+calls (`fractal_reason`,
+`fractal_text_to_sql`, `fractal_embed`, and the agent family) fail
+without a configured endpoint; run the file without `-bail` so each one
+prints its own error and the shell carries on to the next section, and
+the script's header documents which sections are reasoning-gated before
+you get there.
+
+```sh
+{ echo "LOAD '<path>/fractalsql.v1.5.6.<platform>.duckdb_extension';"; \
+  cat demo/benchmark-api-reference.sql; } | duckdb -unsigned mydb.duckdb
+```
+
+## Lakehouse: Iceberg
+
+[demo-lakehouse-iceberg.sql](demo-lakehouse-iceberg.sql) reads a support-ticket
+table stored as an Apache Iceberg table, using the DuckDB `iceberg` extension in
+the same session as FractalSQL. It covers the nearest-ticket lookup and the
+pre-commit safety screen over outage states.
+
+The table is written by [lakehouse/make_iceberg_fixture.py](lakehouse/make_iceberg_fixture.py)
+first. The script expects it at `/lake/tickets.metadata.json`, which is where the
+docker demo's `lake-fixture` service puts it. The section that calls the
+reasoning tier needs a configured endpoint. The rest runs without one.
+
+The walkthrough, the vector-type cast, and the setup steps are in
+[docs/lakehouse-iceberg.md](../docs/lakehouse-iceberg.md).
+
+[demo-lakehouse-ducklake.sql](demo-lakehouse-ducklake.sql) runs the same
+scenario on a DuckLake table, written by
+[lakehouse/make_ducklake_fixture.sql](lakehouse/make_ducklake_fixture.sql).
+Setup and the comparison with Iceberg are in
+[docs/lakehouse-ducklake.md](../docs/lakehouse-ducklake.md).
+
+## Cleanup
+
+The demo tables are left in place after running so you can poke at the
+results. DuckDB's `DROP TABLE` takes one table per statement (no
+`DROP TABLE a, b;`) -- drop them one at a time when you're done:
+
+```sql
+DROP TABLE demo_alerts; DROP TABLE demo_points; DROP TABLE demo_embeddings;
+DROP TABLE order_items; DROP TABLE orders; DROP TABLE customers;  -- demo-text-to-sql.sql
+DROP TABLE bi_customer_features; DROP TABLE bi_orders; DROP TABLE bi_customers;  -- demo-business-intelligence.sql (the bi_* TEMP fixtures evaporate with the connection)
+DROP TABLE spike_candidates; DROP TABLE spike_negative_control;  -- text-to-sql-spike-*.sql
+DROP TABLE bt_bench_clusters; DROP TABLE bt_bench_corpus; DROP TABLE bt_bench_docs;  -- benchmark.sql
+DROP TABLE vqf_assets; DROP TABLE vqf_loadings; DROP TABLE vqf_allocation_snapshots;  -- demo-vertical-quant-finance.sql
+DROP TABLE vmc_patients;  -- demo-vertical-medtech-clinical.sql
+DROP TABLE vrs_genres; DROP TABLE vrs_catalog; DROP TABLE vrs_modal_items;  -- demo-vertical-recommendation-search.sql
+DROP TABLE vse_nodes; DROP TABLE vse_throughput;  -- demo-vertical-sovereign-edge-ai.sql
+DROP TABLE vmd_vessels;  -- demo-vertical-maritime-defense.sql
+DROP TABLE vfl_vehicles;  -- demo-vertical-fleet-logistics.sql
+DROP TABLE vsc_sensors;  -- demo-vertical-smart-cities-iot.sql
+DROP TABLE vcy_hosts;  -- demo-vertical-cybersecurity-threat-detection.sql
+DROP TABLE vbg_cells;  -- demo-vertical-biotech-genomics.sql
+DROP TABLE vae_nodes; DROP TABLE vae_tasks; DROP TABLE vae_agents;  -- demo-vertical-agentic-edge-swarm.sql
+DROP TABLE incident_logs; DROP TABLE agent_capabilities; DROP TABLE known_bad_states;  -- demo-vertical-agentic-ops-devops.sql
+DROP TABLE trade_strategies; DROP TABLE portfolios; DROP TABLE assets;
+DROP TABLE restrictions; DROP TABLE historical_allocations;  -- demo-vertical-agentic-fintech-mcts.sql
+DROP TABLE customer_sessions; DROP TABLE customer_playbook; DROP TABLE product_catalog;  -- demo-vertical-agentic-customer-support.sql
+DROP TABLE bmk_corpus; DROP TABLE bmk_docs; DROP TABLE bmk_modal;  -- benchmark-api-reference.sql
+DROP TABLE agents_demo_logs; DROP TABLE agents_demo_caps; DROP TABLE agents_demo_badstates;
+DROP TABLE agents_demo_mem; DROP TABLE agents_demo_catalog; DROP TABLE agents_demo_data;
+DROP TABLE agents_demo_patients; DROP TABLE agents_demo_fcatalog; DROP TABLE agents_demo_fwarmup;
+DROP TABLE agents_demo_nodes; DROP TABLE agents_demo_alloc; DROP TABLE agents_demo_vehicles;
+DROP TABLE agents_demo_tracks;  -- demo-agents.sql
+DROP TABLE ebl_telemetry;  -- demo-vertical-ev-battery-lifecycle.sql
+DROP TABLE asv_known_bad; DROP TABLE asv_proposed; DROP TABLE asv_routes;  -- demo-vertical-adas-safety-validation.sql
+DROP TABLE v2x_capabilities; DROP TABLE v2x_claims;  -- demo-vertical-v2x-warranty-triage.sql
+DROP TABLE cir_depots; DROP TABLE cir_consumption; DROP TABLE cir_profile; DROP TABLE cir_result;  -- demo-vertical-critical-inventory-routing.sql
+DROP TABLE hpm_readings;  -- demo-vertical-heavy-industry-predictive-maintenance.sql
+DROP TABLE cgb_freq; DROP TABLE cgb_resources; DROP TABLE cgb_result;  -- demo-vertical-climatech-grid-balancing.sql
+DROP TABLE hot_workers;  -- demo-vertical-hazmat-occupational-triage.sql
+DROP TABLE sps_scenarios; DROP TABLE sps_scout;  -- demo-vertical-scenario-planning-simulation.sql
+DROP TABLE afp_flights;  -- demo-vertical-avionics-fault-prediction.sql
+DROP TABLE scc_footprints; DROP TABLE scc_slots;  -- demo-vertical-satellite-constellation-coverage.sql
+DROP TABLE taa_known_anomalous; DROP TABLE taa_proposed;  -- demo-vertical-telecom-account-anomaly-screening.sql
+DROP TABLE ttr_nodes; DROP TABLE ttr_requests;  -- demo-vertical-telecom-traffic-routing.sql
+DROP TABLE cem_readings;  -- demo-vertical-climatech-emissions-monitoring.sql
+DROP TABLE cre_grid;  -- demo-vertical-climatech-risk-exposure.sql
+DROP TABLE rfs_capture; DROP TABLE rfs_entropy;  -- demo-vertical-rf-spectrum-sensing.sql
+DROP TABLE esa_latency; DROP TABLE esa_rate; DROP TABLE esa_lprof; DROP TABLE esa_rprof; DROP TABLE esa_rprof_freq; DROP TABLE esa_health; DROP TABLE esa_traj;  -- demo-vertical-event-stream-anomaly-triage.sql
+DROP TABLE oif_known; DROP TABLE oif_proposed; DROP TABLE oif_screen; DROP TABLE oif_screen_l2; DROP TABLE oif_clicks; DROP TABLE oif_dim;  -- demo-vertical-outlier-interception-footprint.sql
+DROP TABLE abr_outcome; DROP TABLE abr_prof; DROP TABLE abr_result; DROP TABLE abr_models; DROP TABLE abr_events; DROP TABLE abr_routed;  -- demo-vertical-agentic-budget-reallocation.sql
+DROP TABLE spt_items; DROP TABLE spt_traj; DROP TABLE spt_triage;  -- demo-vertical-stalled-process-triage.sql
+DROP TABLE imd_entities; DROP TABLE imd_picks; DROP TABLE imd_scout; DROP TABLE imd_content; DROP TABLE imd_rec;  -- demo-vertical-intent-matching-discovery.sql
+DROP TABLE anr_candidates; DROP TABLE anr_recall; DROP TABLE anr_actions; DROP TABLE anr_rec;  -- demo-vertical-agentic-next-action-ranking.sql
+DROP TABLE drd_risk; DROP TABLE drd_prof; DROP TABLE drd_clauses; DROP TABLE drd_picks; DROP TABLE drd_scout; DROP TABLE drd_approved; DROP TABLE drd_rec;  -- demo-vertical-document-risk-drift.sql
+DROP TABLE crd_known; DROP TABLE crd_proposed; DROP TABLE crd_screen; DROP TABLE crd_records; DROP TABLE crd_traj; DROP TABLE crd_locations; DROP TABLE crd_dim;  -- demo-vertical-coordinated-record-detection.sql
+DROP TABLE sta_demand; DROP TABLE sta_prof; DROP TABLE sta_result;  -- demo-vertical-sensor-telemetry-allocation.sql
+DROP TABLE sed_price; DROP TABLE sed_prof; DROP TABLE sed_prof_freq; DROP TABLE sed_result; DROP TABLE sed_loop;  -- demo-vertical-simulated-economy-drift.sql
+DROP TABLE msr_units; DROP TABLE msr_prof; DROP TABLE msr_result;  -- demo-vertical-multi-series-replenishment.sql
+DROP TABLE pps_sales; DROP TABLE pps_prof; DROP TABLE pps_prof_freq; DROP TABLE pps_result; DROP TABLE pps_catalog; DROP TABLE pps_rec;  -- demo-vertical-periodicity-portfolio-selection.sql
+DROP TABLE arr_offers; DROP TABLE arr_picks; DROP TABLE arr_scout; DROP TABLE arr_sessions; DROP TABLE arr_recall;  -- demo-vertical-agentic-recall-recommendation.sql
+DROP TABLE sfp_parcels; DROP TABLE sfp_dim; DROP TABLE sfp_index; DROP TABLE sfp_prof; DROP TABLE sfp_result; DROP TABLE sfp_comps; DROP TABLE sfp_picks; DROP TABLE sfp_scout;  -- demo-vertical-spatial-footprint-portfolio-risk.sql
+```
+
+(`demo-vertical-agentic-edge-swarm.sql`'s and
+`demo-vertical-biotech-genomics.sql`'s table lists above match this
+README -- if you are reading a tree where those two files predate the
+current fixture set, trust the files' own closing `.print` blocks.)
+
+`demo-vectorizer.sql` and `demo-fractal-vector.sql` each tear themselves
+down at the top of every re-run and print their own one-line cleanup
+recipe at the end (`fractal_vectorizer_drop()` + `DROP TABLE` -- this
+build's vectorizer registry/queue are per-DB persistent tables
+(`fractal_vectorizers` / `fractal_vectorizer_queue`), which is exactly
+why the recipe ends with the drop) -- see each file's own closing
+`.print` block rather than duplicating that here. Any vectorizer rows
+left over from other demos come out the same way:
+
+```sql
+DELETE FROM fractal_vectorizers WHERE source_table IN ('bt_bench_docs', 'bmk_docs', 'incident_logs', 'trade_strategies');
+```
+
+## Troubleshooting
+
+- **Section 0 fails** -- the extension isn't loaded for this
+  connection. See [../docs/getting-started.md](../docs/getting-started.md).
+- **Section 3 or 4 fails** -- reasoning isn't configured, or the endpoint
+  is unreachable/misconfigured. See the Troubleshooting section in
+  [../docs/reasoning-setup.md](../docs/reasoning-setup.md) -- it covers
+  the specific error strings you'll see ("no reasoning plugin loaded
+  (FRACTALSQL_REASONING_PLUGIN ...)", HTTP 401, timeout, non-2xx
+  response) and what each one means.
+- **The reasoning response reads oddly** (e.g. the model asks for data
+  instead of describing it) -- check that the `context` subquery in that
+  section actually returned rows. An empty or NULL context still gets
+  sent as `'{}'`, and the model's default system prompt explicitly
+  expects "database search results" to analyze; with nothing there, it
+  will say so rather than hallucinate an answer.

@@ -1,0 +1,8 @@
+/* Linux linker version script: the extension exports its entry point and
+ * nothing else. The vendored core and the extension API table stay private. */
+{
+  global:
+    fractalsql_init_c_api;
+  local:
+    *;
+};

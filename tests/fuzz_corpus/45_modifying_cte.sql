@@ -1,0 +1,1 @@
+WITH d AS (DELETE FROM bt_orders RETURNING *) SELECT * FROM d;

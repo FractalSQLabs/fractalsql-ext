@@ -1,0 +1,26 @@
+{
+  "commits": 50,
+  "rows_per_commit": 1000,
+  "total_rows": 50000,
+  "dim": 8,
+  "duckdb": "1.5.6",
+  "formats": {
+    "iceberg": {
+      "commit_ms_median": 91.28,
+      "commit_ms_last10": 104.471,
+      "files": 201,
+      "data_bytes": 5482780,
+      "catalog_bytes": 20480,
+      "query_ms_median": 117.432
+    },
+    "ducklake": {
+      "commit_ms_median": 26.636,
+      "commit_ms_last10": 35.545,
+      "files": 50,
+      "data_bytes": 3456332,
+      "catalog_bytes": 3944448,
+      "query_ms_median": 62.375
+    }
+  },
+  "native_query_ms_median": 19.609
+}

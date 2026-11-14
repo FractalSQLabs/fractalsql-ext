@@ -1,13 +1,5 @@
-# CMake / build output
+# Build output
 build/
-cmake-build*/
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-Makefile.cmake
-
-# NOTE: include/sfs_core_bc.h is a tracked source file
-# (pre-compiled LuaJIT bytecode). Do not add it to this list.
 
 # Build artifacts
 *.o
@@ -17,7 +9,18 @@ Makefile.cmake
 *.duckdb_extension
 fractalsql.duckdb_extension
 
-# Build output trees
+# Tracked exceptions: the prebuilt libraries under include/ (including the per-platform
+# include/<os>-<arch>/ directories) are committed. `**` is needed because `*` does not cross
+# a directory separator.
+!include/**/*.a
+!include/**/*.so
+!include/**/*.dylib
+!include/**/*.lib
+!include/**/*.dll
+!include/VERSION
+!include/REASONING_VERSION
+
+# Distribution output
 dist/
 
 # Packaging temp files
@@ -27,10 +30,115 @@ dist/
 libduckdb/
 *.duckdb
 
-# Editor / OS cruft
+# Editor and OS files
 .vscode/
 .idea/
 *.swp
 *~
 .DS_Store
 Thumbs.db
+/tmp-demo-ext/
+/tmp-lake/
+
+# Local scratch: probe objects, Windows build trees, console logs
+probe_*.obj
+probe_*.db
+build-windows/
+build-windows-asan/
+build-windows-*/
+build-console.log
+tmp-*.log
+
+# Coverage reports, debug symbols, scratch databases, local compose override
+coverage_html/
+*.pdb
+/*.db
+/*.db.wal
+/docker-compose.tmp.yml
+
+# Benchmark virtualenv
+bench/.venv/
+build-native-asan/
+build-native-ubsan/
+
+# Demo spool files: the demos write generated SQL next to themselves on every run.
+/agents_demo_iso.sql
+/agents_demo_rebal.sql
+/agents_demo_sched.sql
+/agents_demo_warm.sql
+/agents_hs.sql
+/agents_pt.sql
+/bi_generated.sql
+/bi_trend.sql
+/ftm_rebal.sql
+/vae_cd.sql
+/vcs_hs.sql
+/vcy_periodogram.sql
+/vcy_tel.sql
+/vcy_traj.sql
+/vfl_tel.sql
+/vfl_traj.sql
+/vmc_hs.sql
+/vmd_tel.sql
+/vmd_traj.sql
+/vmd_traj2.sql
+/vqf_traj.sql
+/vrs_isolate.sql
+/vrs_tel.sql
+/vrs_warm.sql
+/vsc_tel.sql
+/vse_tel.sql
+/demo/agents_demo_iso.sql
+/demo/agents_demo_rebal.sql
+/demo/agents_demo_sched.sql
+/demo/agents_demo_warm.sql
+/demo/agents_hs.sql
+/demo/agents_pt.sql
+/demo/bi_generated.sql
+/demo/bi_trend.sql
+/demo/ftm_rebal.sql
+/demo/vae_cd.sql
+/demo/vcs_hs.sql
+/demo/vcy_periodogram.sql
+/demo/vcy_tel.sql
+/demo/vcy_traj.sql
+/demo/vfl_tel.sql
+/demo/vfl_traj.sql
+/demo/vmc_hs.sql
+/demo/vmd_tel.sql
+/demo/vmd_traj.sql
+/demo/vmd_traj2.sql
+/demo/vqf_traj.sql
+/demo/vrs_isolate.sql
+/demo/vrs_tel.sql
+/demo/vrs_warm.sql
+/demo/vsc_tel.sql
+/demo/vse_tel.sql
+
+# Internal working notes
+/duckdbtodoplan.txt
+/todo.txt
+/changes-port.txt
+/port-status-*.md
+/changes_v*.patch
+
+# Compliance working papers (kept out of the published tree)
+/COMPLIANCE_AUDIT.md
+/REMEDIATION_LOG.md
+/REMEDIATION_PROMPT.md
+/remediation-prompt.md
+
+# Python bytecode caches
+__pycache__/
+*.pyc
+
+# Scratch files left in the repository root by test runs
+/mcp_https_*
+/*.db
+/x.*
+
+# Local tooling and MCP build leftovers
+/kx.db
+mcp/duckdb.dll
+mcp/*.exe
+mcp/fractalsql-ext-mcp

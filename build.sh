@@ -1,78 +1,73 @@
 #!/bin/bash
 #
-# duckdb-fractalsql multi-(version, arch) build driver.
+# fractalsql-ext build driver: the pure-C extension, built in the pinned glibc baseline (docker/Dockerfile),
+# then laid out as one release cell per supported DuckDB version.
 #
-# Drives docker/Dockerfile to produce ONE extension file per
-# (DUCKDB_VERSION, ARCH) cell:
+#   ./build.sh [amd64|arm64]
 #
-#   dist/${ARCH}/fractalsql.${DUCKDB_VERSION}.linux_${ARCH}.duckdb_extension
+# Output, in dist/<arch>/ :
 #
-# e.g.:
+#   fractalsql.v1.4.5.linux_<arch>.duckdb_extension   1.4 band (C_STRUCT_UNSTABLE): exactly DuckDB 1.4.5
+#   fractalsql.v1.5.6.linux_<arch>.duckdb_extension   stable band (C_STRUCT, v1.5.6 header)
+#   fractalsql.v2.0.0.linux_<arch>.duckdb_extension   the same stable-band file: it loads on 2.0.0 as well
 #
-#   dist/amd64/fractalsql.v1.5.2.linux_amd64.duckdb_extension
+# Two builds, not three: the stable-API band is one binary that DuckDB 1.5.6 and 2.0.0 both accept, so those two
+# cells are copies of it. The 1.4 line has an unstable API and gets a build of its own, tied to one 1.4.N
+# (L_VERSION in the Makefile; rebuild when a new 1.4.x ships).
 #
-# Usage:
-#   ./build.sh [amd64|arm64]          # default: amd64
+# Native, without Docker (any Linux or macOS host; not the pinned glibc baseline): make
+# Sanitizer builds are not release artifacts: make SAN=address|undefined|thread, or build_test.sh gates 48 and 51.
 #
-# Per-DuckDB-version override:
-#   DUCKDB_VERSION=v1.2.2 ./build.sh amd64
+# Env: DIST_DIR (default ./dist), STABLE_VERSIONS (default "v1.5.6 v2.0.0"), BUILDX_CACHE_ARGS.
 
 set -euo pipefail
 
 ARCH="${1:-amd64}"
 case "${ARCH}" in
     amd64|arm64) ;;
-    *)
-        echo "unknown arch '${ARCH}' — expected amd64 or arm64" >&2
-        exit 2
-        ;;
+    *) echo "unknown arch '${ARCH}' -- expected amd64 or arm64" >&2; exit 2 ;;
 esac
+[ "$#" -le 1 ] || { echo "unexpected argument '$2' (the profile and sanitizer options went away with the C++ build)" >&2; exit 2; }
 
 DIST_DIR="${DIST_DIR:-./dist}"
-DOCKERFILE="${DOCKERFILE:-docker/Dockerfile}"
-PLATFORM="linux/${ARCH}"
+STABLE_VERSIONS="${STABLE_VERSIONS:-v1.5.6 v2.0.0}"
 OUT_DIR="${DIST_DIR}/${ARCH}"
-DUCKDB_VERSION="${DUCKDB_VERSION:-v1.5.2}"
-STAGING_DIR="${OUT_DIR}/.staging-${DUCKDB_VERSION}"
+STAGING_DIR="${OUT_DIR}/.staging"
+BUILDX_CACHE_ARGS="${BUILDX_CACHE_ARGS:-}"
 
-# Version/platform-tagged output name. DuckDB 1.4+ requires the
-# filename to END with '.duckdb_extension' (the loader rejects any
-# other suffix), so we put the tag in the MIDDLE of the name instead
-# of after the extension. Identity still lives in the filename,
-# DuckDB still accepts it at LOAD time.
-OUT_NAME="fractalsql.${DUCKDB_VERSION}.linux_${ARCH}.duckdb_extension"
-
+rm -rf "${STAGING_DIR}"
 mkdir -p "${OUT_DIR}" "${STAGING_DIR}"
 
 echo "------------------------------------------"
-echo "Building duckdb-fractalsql for ${PLATFORM}"
-echo "  DUCKDB_VERSION=${DUCKDB_VERSION}"
-echo "  -> ${OUT_DIR}/${OUT_NAME}"
+echo "Building fractalsql-ext (pure C)"
+echo "  arch:            linux/${ARCH}"
+echo "  stable band for: ${STABLE_VERSIONS}"
+echo "  output:          ${OUT_DIR}"
 echo "------------------------------------------"
 
-# CI sets BUILDX_CACHE_ARGS to plug in the GitHub Actions cache
-# backend. Scope per (version, arch) so cells don't clobber.
-BUILDX_CACHE_ARGS="${BUILDX_CACHE_ARGS:-}"
-
 DOCKER_BUILDKIT=1 docker buildx build \
-    --platform "${PLATFORM}" \
+    --platform "linux/${ARCH}" \
     --build-arg "BUILD_ARCH=${ARCH}" \
-    --build-arg "DUCKDB_VERSION=${DUCKDB_VERSION}" \
     ${BUILDX_CACHE_ARGS} \
     --target export \
     --output "type=local,dest=${STAGING_DIR}" \
-    -f "${DOCKERFILE}" \
+    -f "${DOCKERFILE:-docker/Dockerfile}" \
     .
 
-# Re-tag the extracted artifact with its (duckdb_version, platform)
-# name on the host side. buildx always emits the fixed name the
-# scratch export copies; we rename here so the matrix runner can
-# upload each cell with an identifiable filename.
-mv "${STAGING_DIR}/fractalsql.duckdb_extension" \
-   "${OUT_DIR}/${OUT_NAME}"
+STABLE="${STAGING_DIR}/fractalsql.capi.linux_${ARCH}.duckdb_extension"
+[ -f "${STABLE}" ] || { echo "the build did not produce ${STABLE}" >&2; exit 1; }
+for v in ${STABLE_VERSIONS}; do
+    install -m0644 "${STABLE}" "${OUT_DIR}/fractalsql.${v}.linux_${ARCH}.duckdb_extension"
+done
+# the 1.4 band keeps the name the build gave it (it already carries its 1.4.N)
+found=0
+for f in "${STAGING_DIR}"/fractalsql.v1.4.*.linux_"${ARCH}".duckdb_extension; do
+    [ -f "$f" ] || continue
+    install -m0644 "$f" "${OUT_DIR}/$(basename "$f")"; found=1
+done
+[ "${found}" -eq 1 ] || { echo "the build did not produce a 1.4 band file" >&2; exit 1; }
 rm -rf "${STAGING_DIR}"
 
 echo
-echo "Built artifact for ${ARCH} @ ${DUCKDB_VERSION}:"
-ls -l "${OUT_DIR}/${OUT_NAME}"
-file "${OUT_DIR}/${OUT_NAME}" 2>/dev/null || true
+echo "Built for ${ARCH}:"
+ls -l "${OUT_DIR}"/fractalsql.v*.linux_"${ARCH}".duckdb_extension

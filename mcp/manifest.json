@@ -1,0 +1,334 @@
+{
+  "name": "fractalsql-ext-mcp",
+  "server": {
+    "entry_point": "fractalsql-ext-mcp",
+    "type": "binary"
+  },
+  "tools": [
+    {
+      "description": "The extension version and edition, the DuckDB version it is running in, and this MCP server's version.",
+      "name": "fractal_version"
+    },
+    {
+      "description": "Reads back one configuration key of this DuckDB server: the reasoning plugin path, the chat and embedding endpoints, the model names, the think mode, the response mode or the enterprise library. The key names are the short ones the docs use (http_url, http_model, http_embed_url, ...); the environment variable behind each key is named in the docs too. The provider token is a secret and is never read back through any tool. Reading a key is not a write, so FSQL_MCP_CONFIG_WRITES does not restrict it.",
+      "name": "fractal_config_get"
+    },
+    {
+      "description": "Sets one configuration key of this DuckDB server (the DuckDB column's wrapper over fractal_config_set(key, value)): the reasoning plugin path, the chat and embedding endpoints, the model names, the think mode, the response mode or the enterprise library. The configuration is the environment the extension reads, so the new value is in force from the next call on. FSQL_MCP_CONFIG_WRITES decides what may be written: off refuses every key, safe (the default) allows the model names and the think mode only, and all allows every key. destructiveHint-flagged: repointing an endpoint silently redirects every subsequent reasoning and embedding call, and the enterprise key changes the tier that is loaded.",
+      "name": "fractal_config_set"
+    },
+    {
+      "description": "Configures the reasoning and embedding provider in one call: the chat endpoint (provider_url), the embeddings endpoint (embed_url), the chat model (model), the embedding model (embed_model) and the reasoning effort (think_mode). The DuckDB column's wrapper over fractal_config_set on this server's configuration: the change is in force from the next call on. FSQL_MCP_CONFIG_WRITES decides what may be written, and a call that names a key the switch refuses changes nothing at all. It never touches the provider token or the enterprise key: the token belongs in the server's environment. destructiveHint-flagged: repointing the provider URL silently redirects every subsequent reasoning call.",
+      "name": "fractal_configure_reasoning"
+    },
+    {
+      "description": "Cardinality-constrained portfolio optimisation, then a written rationale. Returns the allocation, its Sharpe ratio and the rationale (or the computed half plus reasoning_step_failed).",
+      "name": "fractal_agent_allocate"
+    },
+    {
+      "description": "Drift on one entity's metric series read from a table, then a model-written triage summary. Returns threat_score, anomaly_type and triage_summary.",
+      "name": "fractal_agent_anomaly_triage"
+    },
+    {
+      "description": "Natural-language question over your tables: the model writes SQL, the engine validates and runs it, and the model analyses the rows. auto_execute defaults to FALSE: the call then only generates and validates SQL (analysis null). Pass auto_execute=true to run it.",
+      "name": "fractal_agent_data_analyst"
+    },
+    {
+      "description": "SimHash + Brent cycle-detection safety monitor for an agent's own behavior. A loop is flagged when EITHER signal fires; only the FIRST closed cycle is reported. Returns {agent_id, dfa_exponent, is_loop_detected[, cycle_len, at_index]}. GOTCHA: encode scalar states one-hot, not 1-dim, or a same-signed scalar log false-positives as looping.",
+      "name": "fractal_agent_detect_loop"
+    },
+    {
+      "description": "Classify a vehicle detour: nearest fleet peer by route change plus the box-counting complexity of its GPS trace, with a written verdict.",
+      "name": "fractal_agent_detour_classify"
+    },
+    {
+      "description": "Enterprise: several mutually different near-optimal portfolios (sharpe) or the return-versus-risk front (pareto), with a written comparison.",
+      "name": "fractal_agent_diverse_portfolios"
+    },
+    {
+      "description": "Self-contained Diversify health-check cycle, NO LLM step: enable repulsion, warm the D_q window, report negative feedback on the top result, read back diagnostics, then SELF-DISABLE (a complete audit cycle). Returns {diversity_quotient, explanation}.",
+      "name": "fractal_agent_feedback_audit"
+    },
+    {
+      "description": "Sensor-grid coverage: morphological dimension and lacunarity of the point cloud plus drift in the telemetry, then an alert.",
+      "name": "fractal_agent_network_coverage_alert"
+    },
+    {
+      "description": "Intercept a proposed state that is too close to a known-bad one. Returns intercepted, the nearest distance and a reason.",
+      "name": "fractal_agent_outlier_intercept"
+    },
+    {
+      "description": "Cohort search plus the drift from baseline to current, then a written triage.",
+      "name": "fractal_agent_patient_deterioration_triage"
+    },
+    {
+      "description": "Embed a seed state and branch it into the nearest strategies (rows). Needs an embedding provider.",
+      "name": "fractal_agent_plan_explore"
+    },
+    {
+      "description": "Optimise a portfolio, find the most similar past allocation by weight change, and explain the rebalance.",
+      "name": "fractal_agent_rebalance_sibling"
+    },
+    {
+      "description": "Pure retrieval, no model: the nearest memories to a query, optionally within a cohort.",
+      "name": "fractal_agent_recall_hybrid"
+    },
+    {
+      "description": "Repulsion-diverse top-k recommendations, NO LLM step: enables session Diversify, then repulsion-aware top-k so re-searches avoid recently-rejected items. Returns [{item_id,score}]. SIDE EFFECT: leaves Diversify ON for this session; call fractal_diversify_disable when done.",
+      "name": "fractal_agent_recommend_diverse"
+    },
+    {
+      "description": "General-purpose regime check on any series: DFA exponent and drift, then a written triage.",
+      "name": "fractal_agent_regime_triage"
+    },
+    {
+      "description": "Route a task to the nearest capability under a token budget, with a written justification.",
+      "name": "fractal_agent_route_task"
+    },
+    {
+      "description": "Place a workload on the nearest node by capability vector, with a written justification and confidence.",
+      "name": "fractal_agent_schedule_workload"
+    },
+    {
+      "description": "Track deviation check: nearest peer plus the DFA exponent of the heading series, with a written assessment.",
+      "name": "fractal_agent_track_anomaly"
+    },
+    {
+      "description": "Project the next state: the drift since a baseline row applied to the current state (rows). No model.",
+      "name": "fractal_agent_trajectory_predict"
+    },
+    {
+      "description": "Append a record to the tamper-evident decision-audit chain. Needs the enterprise tier.",
+      "name": "fractal_audit_log"
+    },
+    {
+      "description": "Decode a persisted audit blob (hex) into its JSON.",
+      "name": "fractal_audit_unpack"
+    },
+    {
+      "description": "DFA's complement: localizes WHERE a series' mean and/or variance shifted, via a sliding two-sample test over adjacent windows. Returns {'indices':[...]}, ascending, up to max_points.",
+      "name": "fractal_change_point_detect"
+    },
+    {
+      "description": "Gyrification Index (Zilles et al. 1988) from a pre-extracted brain-surface mesh. Returns {'mesh_area','hull_area','gyrification_index'}.",
+      "name": "fractal_cortical_folding"
+    },
+    {
+      "description": "Weighted concatenation of two modality vectors (e.g. morphology + clinical) before the search: [morphology*alpha, clinical*(1-alpha)]. Returns [{doc_id, distance}]; doc_id is a 0-indexed scan position, not a row locator.",
+      "name": "fractal_cross_modal_search"
+    },
+    {
+      "description": "Find a cycle in a stream of fingerprints (Brent), tolerating a few differing bits (rows).",
+      "name": "fractal_cycle_detect"
+    },
+    {
+      "description": "Current diversity quotient (D_q) for THIS session from the last search. Returns null when Diversify is off or nothing has searched yet.",
+      "name": "fractal_detect_collapse"
+    },
+    {
+      "description": "Minkowski-Bouligand box-counting dimension of a point cloud. Documented minimum 8 points; for a STABLE estimate this org's own testing found it needs hundreds.",
+      "name": "fractal_dimension_boxcount"
+    },
+    {
+      "description": "DFA scaling exponent (alpha): ~0.5 uncorrelated noise, ~1.0 1/f pink noise, ~1.5 Brownian motion, <0.5 anti-correlated. Documented minimum 16 points; this org's own testing found ~24 is the real floor for a stable estimate.",
+      "name": "fractal_dimension_dfa"
+    },
+    {
+      "description": "Regime-change detection: DFA exponent of the recent window vs the baseline. Returns {drift, recent_alpha, baseline_alpha}; drift is a SIGNED numeric (recent - baseline): positive = increasing complexity/irregularity, negative = approaching a more ordered state. Requires n >= window + 16, window >= 16.",
+      "name": "fractal_dimension_drift"
+    },
+    {
+      "description": "Turns the Diversify/Repulsion layer back off for THIS session. fractal_agent_recommend_diverse leaves it ON; this is that tool's cleanup.",
+      "name": "fractal_diversify_disable"
+    },
+    {
+      "description": "Turns on the stateful Diversify/Repulsion layer for THIS session: searches then avoid the neighbourhoods of negative-reported results ('shadows'). Off by default; session-scoped.",
+      "name": "fractal_diversify_enable"
+    },
+    {
+      "description": "Tunes the repulsion layer for THIS session. Every field optional; supplying only some keys keeps the core's current value for the rest. Takes effect on the next search.",
+      "name": "fractal_diversify_set_params"
+    },
+    {
+      "description": "Embed text with the configured embedding model; returns the vector.",
+      "name": "fractal_embed"
+    },
+    {
+      "description": "Session-level Diversify diagnostics JSON: {dq, diversify_enabled, overhead_p99_us}.",
+      "name": "fractal_explain_result"
+    },
+    {
+      "description": "Reports dwell/positive/negative engagement on a prior search result, feeding the shadow store when Diversify is enabled. result_handle is the scan_pos the result came from, NOT its doc_id. kind must be 'dwell', 'positive' or 'negative'.",
+      "name": "fractal_feedback_report"
+    },
+    {
+      "description": "Cohort-restricted sibling of fractal_search_telemetry: pass an explicit JSON array of rowid locators to restrict the scan before ranking. Errors 'doc_ids cohort matched no rows' on an empty cohort. doc_id/scan_pos semantics match fractal_search_telemetry, scan_pos counted within the cohort-filtered corpus.",
+      "name": "fractal_hybrid_clinical_search"
+    },
+    {
+      "description": "Convenience wrapper for fractal_feedback_report(result_handle,'negative') with no dwell time: reject the result's neighbourhood outright.",
+      "name": "fractal_isolate_background"
+    },
+    {
+      "description": "Compact the ledger. Needs the enterprise tier.",
+      "name": "fractal_ledger_compact"
+    },
+    {
+      "description": "Persist the ledger to its file. Needs the enterprise tier.",
+      "name": "fractal_ledger_flush"
+    },
+    {
+      "description": "Load the persisted ledger into memory. Needs the enterprise tier.",
+      "name": "fractal_ledger_load"
+    },
+    {
+      "description": "Erase the ledger entirely. Irreversible. Needs the enterprise tier.",
+      "name": "fractal_ledger_reset_hard"
+    },
+    {
+      "description": "Clear the in-memory shadow state, keeping the truth ledger. Needs the enterprise tier.",
+      "name": "fractal_ledger_reset_soft"
+    },
+    {
+      "description": "Entries in the shadow ledger. Needs the enterprise tier.",
+      "name": "fractal_ledger_shadow_count"
+    },
+    {
+      "description": "Entries in the truth ledger. Needs the enterprise tier.",
+      "name": "fractal_ledger_truth_count"
+    },
+    {
+      "description": "Walks the ENTIRE chain for the given kind (O(n)). Returns {'ok':true,'rows_verified':N} or {'ok':false,'first_failure_id':ID,'reason':...}. Pure read-only forensic query; works even with NO enterprise library loaded, so a CISO audit never needs a license.",
+      "name": "fractal_ledger_verify"
+    },
+    {
+      "description": "Box-counting dimension + lacunarity of a pre-segmented mask. GOTCHA: wants ~256+ occupied points for a stable read; smaller clouds fail with rc=-1 rather than a confident wrong number. Returns {'dimension','lacunarity'}.",
+      "name": "fractal_morphological_complexity"
+    },
+    {
+      "description": "Nerve-fiber plexus density + dimension from pre-extracted skeleton geometry (corneal confocal microscopy convention). Returns {'fiber_length_density','branch_density','fractal_dimension'}.",
+      "name": "fractal_nerve_plexus_metric"
+    },
+    {
+      "description": "Pareto-front sibling: same restarts, scored by decomposed (return,risk), NSGA-II crowding-distance truncated. Returns {'candidates':[{'return','risk','sharpe','weights'}],'n_found':N}. Enterprise tier.",
+      "name": "fractal_optimize_portfolio_multimodal_pareto"
+    },
+    {
+      "description": "Multi-restart diverse-candidate sibling of fractal_optimize_portfolio. Returns {'candidates':[{'sharpe','weights'}],'n_found':N}. Enterprise tier: clean 'not loaded' error on Community.",
+      "name": "fractal_optimize_portfolio_multimodal"
+    },
+    {
+      "description": "SFS cardinality-constrained Sharpe-ratio maximizer: the best K assets out of a large universe without brute-force exponential cost. Returns {'sharpe','weights'} (<=k nonzero, non-negative, summing to 1.0).",
+      "name": "fractal_optimize_portfolio"
+    },
+    {
+      "description": "Value-weighted k-subset allocation over ANY scored item list: maximize sum(weight[i]*item_values[i]) with at most k nonzero, each weight<=upper_bounds[i], summing to 1.0. Returns {'score','weights'}. The sum of the k largest upper_bounds must reach 1.0 or no feasible subset exists (clean engine error).",
+      "name": "fractal_optimize_subset"
+    },
+    {
+      "description": "Classical periodogram via exact O(n^2) DFT (not FFT). Returns {'freqs':[...], 'power':[...]}: top max_peaks bins, descending power. Catches network-beaconing/retry-cadence DFA alone misses.",
+      "name": "fractal_periodogram"
+    },
+    {
+      "description": "Retrieval-augmented answer over a table (rows): embeds the question, retrieves, and answers from the hits. Needs an embedding provider and a model.",
+      "name": "fractal_rag_agent"
+    },
+    {
+      "description": "Send a question (and optional context) to the configured reasoning model. Needs a model endpoint; otherwise a clean not-configured error.",
+      "name": "fractal_reason"
+    },
+    {
+      "description": "The schema (tables, columns, keys, comments) as text, for composing text-to-SQL questions. Read it before calling fractal_text_to_sql.",
+      "name": "fractal_schema_context"
+    },
+    {
+      "description": "Embed a question, search a table, and answer from the hits (rows). Needs an embedding provider and a model.",
+      "name": "fractal_search_agent"
+    },
+    {
+      "description": "Same Sniper convergence as fractal_search with a full trajectory trace: {dim, generations, population_size, best_point, best_fit, best_fit_per_gen, paths}. best_point is a plain JSON array of numbers.",
+      "name": "fractal_search_debug"
+    },
+    {
+      "description": "Scout-mode diverse population search: brute-force relevance scan over your embedding column followed by MMR re-ranking to prevent mode collapse; the anti-collapsed-top-K primitive.",
+      "name": "fractal_search_explore"
+    },
+    {
+      "description": "Raw Stochastic Fractal Search: the refined best point for a query, with no table. Use fractal_search_telemetry to search a table.",
+      "name": "fractal_search"
+    },
+    {
+      "description": "Ground-truth K-nearest real table rows to a query vector, by exact cosine distance: [{doc_id, distance, scan_pos}]. doc_id is the row's rowid (a real locator; resolve back with WHERE rowid = doc_id), or the row's 0-indexed position within the scan when the table has no rowid column; scan_pos is the 0-indexed position within THIS call's scan, the handle fractal_feedback_report/fractal_isolate_background want, distinct from doc_id.",
+      "name": "fractal_search_telemetry"
+    },
+    {
+      "description": "Drift-vector search: finds the K nearest rows to (current_vector - baseline_vector) : 'what changed', not 'where am I'. Returns [{doc_id, distance}]. CAUTION: doc_id here is ALWAYS a 0-indexed scan position, never a row locator.",
+      "name": "fractal_search_trajectory"
+    },
+    {
+      "description": "Short-time spectral entropy: slides a window over a series and returns, per frame, the normalized Shannon entropy (0..1) of its power spectrum (mean removed, Hann tapered). Low = energy in a few frequencies (beacon, retry loop, locked carrier); high = spread across the band (noise, jamming, lost structure). A constant frame reports 0.0, never NaN. Returns {'entropy':[...]}, one value per frame; feed it to fractal_change_point_detect to localize WHEN the structure changed.",
+      "name": "fractal_spectrogram_entropy"
+    },
+    {
+      "description": "Text-to-SQL with review and (only when auto_execute is true) execution of the generated statement under this connection.",
+      "name": "fractal_sql_agent"
+    },
+    {
+      "description": "Random-hyperplane SimHash (Charikar 2002) of a state vector, returned as a hex string, (n_bits+7)/8 bytes. Near-identical states collapse to the same or low-Hamming-distance fingerprint. GOTCHA: encode scalar states one-hot, not 1-dim.",
+      "name": "fractal_state_fingerprint"
+    },
+    {
+      "description": "Topological persistence over a point cloud's Vietoris-Rips filtration. Returns {'n_h0_bars':N,'h0_bars':[{birth,death}...],'betti1':N|null}. betti1 is the underlying GRAPH's cycle rank, NOT full simplicial H1 (over-counts when a filled triangle exists).",
+      "name": "fractal_tda_persistence_diagram"
+    },
+    {
+      "description": "Generate one validated SELECT from a question. Never executes it.",
+      "name": "fractal_text_to_sql"
+    },
+    {
+      "description": "Vessel-network tortuosity + branch-density + fractal dimension from PRE-EXTRACTED graph geometry (not raw imaging). Returns {'mean_tortuosity','branch_density','fractal_dimension'}.",
+      "name": "fractal_vascular_network"
+    },
+    {
+      "description": "Hamming distance between two binary-quantized vectors (hex strings). A cheap pre-filter ahead of a full-precision re-rank, not a distance substitute.",
+      "name": "fractal_vector_hamming_distance"
+    },
+    {
+      "description": "Register a vectorizer on a table column and backfill its queue with the rows that need embedding. Embedding itself happens in fractal_vectorizer_process_queue.",
+      "name": "fractal_vectorizer_create"
+    },
+    {
+      "description": "PERMANENT AND IRREVERSIBLE: deregisters the vectorizer, drops its trigger and deletes its config/queue history. For a temporary stop use pause instead.",
+      "name": "fractal_vectorizer_drop"
+    },
+    {
+      "description": "Disables a vectorizer (idempotent). New writes aren't queued; the processor skips existing pending rows. Clean error on a nonexistent id.",
+      "name": "fractal_vectorizer_pause"
+    },
+    {
+      "description": "Drives the actual embedding sync: call on your own schedule; there is NO background worker in any engine, by design. Runs in a single transaction; failed rows are NOT retried automatically.",
+      "name": "fractal_vectorizer_process_queue"
+    },
+    {
+      "description": "Re-enables a paused vectorizer. Clean error on a nonexistent id.",
+      "name": "fractal_vectorizer_resume"
+    },
+    {
+      "description": "One row per vectorizer: its source, progress and failures.",
+      "name": "fractal_vectorizer_status"
+    },
+    {
+      "description": "Generalized L_p distance, any p > 0. For 0 < p < 1 this is NOT a proper metric; never substitute silently for cosine/L2.",
+      "name": "fractal_vector_lp_distance"
+    },
+    {
+      "description": "1-bit (sign) quantization: 32x compression, (dim+7)/8 bytes, MSB-first, returned as a hex string. Pairs with fractal_vector_hamming_distance for cheap pre-filtering.",
+      "name": "fractal_vector_quantize_binary"
+    },
+    {
+      "description": "Symmetric int8 quantization of one vector (4x compression). Returns {'scale':S,'codes':[...]}; dequantize via v[i] ~= codes[i]*scale.",
+      "name": "fractal_vector_quantize_int8"
+    }
+  ],
+  "version": "2.0.0"
+}

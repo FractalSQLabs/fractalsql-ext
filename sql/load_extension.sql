@@ -1,12 +1,12 @@
--- sql/load_extension.sql — canonical DuckDB load sequence.
+-- sql/load_extension.sql -- canonical DuckDB load sequence.
 --
 -- DuckDB has no CREATE FUNCTION ... SONAME equivalent. Scalar
 -- functions are registered automatically by the extension's Load()
 -- entry point the moment you LOAD the artifact. Distribution is just
--- the single-file .duckdb_extension — no system package, no
+-- the single-file .duckdb_extension -- no system package, no
 -- per-server plugin dir, no INSTALL step required.
 --
--- The Community edition ships UNSIGNED. DuckDB's loader refuses
+-- The FractalSQL Community edition ships UNSIGNED. DuckDB's loader refuses
 -- unsigned extensions unless you opt in, via one of:
 --
 --   * duckdb -unsigned                     (CLI flag at startup)
@@ -24,8 +24,8 @@
 --
 --     import duckdb
 --     con = duckdb.connect(config={'allow_unsigned_extensions': True})
---     con.execute("LOAD '/path/to/fractalsql.duckdb_extension.v1.3.2.linux_amd64';")
---     con.sql("SELECT fractalsql_edition(), fractalsql_version()").show()
+--     con.execute("LOAD '/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension';")
+--     con.sql("SELECT fractal_edition(), fractal_version()").show()
 
 -- Tolerated by pre-1.1 DuckDB; 1.1+ will ignore or error harmlessly
 -- if the DB is already open unsigned. Prefer the -unsigned CLI flag.
@@ -34,13 +34,13 @@ SET allow_unsigned_extensions = true;
 -- Absolute path is required: the file name encodes (duckdb_version,
 -- platform) in the tail, and the loader validates it against the
 -- footer metadata at load time.
-LOAD '/path/to/fractalsql.duckdb_extension';
+LOAD '/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension';
 
 -- ----------------------------------------------------------------------
 -- Verify registration.
 -- ----------------------------------------------------------------------
-SELECT fractalsql_edition();   -- 'Community'
-SELECT fractalsql_version();   -- '1.0.0'
+SELECT fractal_edition();   -- 'Community'
+SELECT fractal_version();   -- '2.0.0'
 
 -- ----------------------------------------------------------------------
 -- Basic call.
@@ -65,7 +65,7 @@ ORDER BY dist
 LIMIT 10;
 
 -- ----------------------------------------------------------------------
--- Parquet / Iceberg / S3 — no data movement required.
+-- Parquet / Iceberg / S3 -- no data movement required.
 -- ----------------------------------------------------------------------
 -- SELECT id, fractal_search(embedding, $query::DOUBLE[]) AS dist
 -- FROM read_parquet('s3://my-bucket/embeddings/*.parquet')

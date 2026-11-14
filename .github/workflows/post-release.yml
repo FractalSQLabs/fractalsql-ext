@@ -1,7 +1,7 @@
 name: Post-release SBOM + Attestation + Sign
 
-# DuckDB extensions ship as .duckdb_extension binaries + .zip
-# bundles. We SBOM, attest, and sign both.
+# DuckDB extensions ship as one bundle per (DuckDB version, platform): a .tar.gz
+# (.zip on Windows). We SBOM, attest, and sign the bundles.
 
 on:
   release:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag to process (e.g. v1.0.0)'
+        description: 'Release tag to process (e.g. v2.0.0)'
         required: true
 
 permissions:
@@ -17,10 +17,21 @@ permissions:
   id-token: write
   attestations: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Easy-install end-to-end against the release that just published:
+# every push-time trigger point of these scripts is covered by the
+# --dry-run battery in install-test.yml; only a real release carries
+# the assets this flow downloads, so the true download -> verify ->
+# install -> proof -> uninstall path runs here. The release bundle is
+# verified against the release's SHA256SUMS.
+
 jobs:
   sbom-attest-sign:
     name: SBOM + Attest + Sign
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Resolve release tag
         id: tag
@@ -41,7 +52,7 @@ jobs:
         with:
           path: .
           format: spdx-json
-          artifact-name: duckdb-fractalsql-${{ steps.tag.outputs.tag }}.spdx.json
+          artifact-name: fractalsql-ext-${{ steps.tag.outputs.tag }}.spdx.json
           output-file: sbom.spdx.json
           upload-release-assets: true
           upload-artifact: true
@@ -54,16 +65,16 @@ jobs:
           gh release download "${{ steps.tag.outputs.tag }}" \
               --repo "${{ github.repository }}" \
               --dir dist \
-              --pattern '*.duckdb_extension' \
+              --pattern '*.tar.gz' \
               --pattern '*.zip' \
-              || echo "note: no matching assets on release yet — continuing"
+              || echo "note: no matching assets on release yet -- continuing"
           ls -la dist || true
 
       - name: Check there is anything to sign
         id: have_assets
         run: |
           count=$(find dist -maxdepth 1 -type f \
-                \( -name '*.duckdb_extension' -o -name '*.zip' \) \
+                \( -name '*.tar.gz' -o -name '*.zip' \) \
                 2>/dev/null | wc -l)
           echo "count=${count}" >> "$GITHUB_OUTPUT"
           echo "Found ${count} release artifact(s) to attest + sign."
@@ -73,7 +84,7 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: |
-            dist/*.duckdb_extension
+            dist/*.tar.gz
             dist/*.zip
 
       - name: Install cosign
@@ -86,7 +97,7 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
         run: |
           set -euo pipefail
-          for f in dist/*.duckdb_extension dist/*.zip; do
+          for f in dist/*.tar.gz dist/*.zip; do
               [ -f "$f" ] || continue
               echo "--- signing $f ---"
               cosign sign-blob \
@@ -104,7 +115,7 @@ jobs:
           set -euo pipefail
           mapfile -t sigs < <(ls dist/*.sig dist/*.pem 2>/dev/null || true)
           if [ ${#sigs[@]} -eq 0 ]; then
-              echo "note: no signatures produced — nothing to upload"
+              echo "note: no signatures produced -- nothing to upload"
               exit 0
           fi
           gh release upload \
@@ -112,3 +123,118 @@ jobs:
               "${sigs[@]}" \
               --repo "${{ github.repository }}" \
               --clobber
+
+  # --------------------------------------------------------------------
+  # easy_install.sh, true end-to-end, pinned to the published release.
+  # --------------------------------------------------------------------
+  easy-install-e2e-linux:
+    name: easy_install end-to-end (linux_amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "tag=${{ github.event.inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+              echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Install duckdb CLI
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' \
+            "https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip" \
+            -o /tmp/duckdb_cli.zip
+          unzip -p /tmp/duckdb_cli.zip duckdb > /tmp/duckdb
+          chmod +x /tmp/duckdb
+          sudo mv /tmp/duckdb /usr/local/bin/duckdb
+          duckdb --version
+
+      - name: Install + proof + uninstall through easy_install.sh
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/easy_install.sh
+          DUCKDB_BIN=duckdb scripts/easy_install.sh \
+              --release "${TAG}" --duckdb-version v1.5.6 2>&1 | tee /tmp/easy.out
+
+          grep -q "Community" /tmp/easy.out \
+            || { echo "FAIL: proof output missing Community"; exit 1; }
+          test -f "$HOME/.duckdb/extensions/v1.5.6/linux_amd64/fractalsql.duckdb_extension" \
+            || { echo "FAIL: extension not installed into DuckDB's extension directory"; exit 1; }
+          # the short name resolves from that directory
+          duckdb -unsigned -c "LOAD 'fractalsql'; SELECT fractal_edition();" | grep -q Community \
+            || { echo "FAIL: LOAD 'fractalsql' by name did not work after the install"; exit 1; }
+
+          # --yes answers the uninstall prompt without a terminal.
+          scripts/easy_install.sh --release "${TAG}" --uninstall --yes 2>&1 | tee /tmp/un.out
+          test ! -e "$HOME/.duckdb/extensions/v1.5.6/linux_amd64/fractalsql.duckdb_extension" \
+            || { echo "FAIL: uninstall left the extension behind"; exit 1; }
+          echo "ok: easy_install.sh end-to-end install + proof + uninstall"
+
+  # --------------------------------------------------------------------
+  # easy_install.ps1, install + proof (the ps1 uninstall prompt uses
+  # Read-Host, which cannot be driven non-interactively; the sh job
+  # above covers the uninstall flow).
+  # --------------------------------------------------------------------
+  easy-install-e2e-windows:
+    name: easy_install end-to-end (windows_amd64)
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Resolve release tag
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$($env:INPUT_RELEASE_TAG)"
+          } else {
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "tag=$($env:GITHUB_RELEASE_TAG)"
+          }
+        env:
+          INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          GITHUB_RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Install duckdb CLI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path C:\deps\duckdb | Out-Null
+          # Expand-Archive needs a .zip suffix.
+          Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-windows-amd64.zip" -OutFile C:\deps\duckdb\duckdb_cli.zip
+          Expand-Archive -Path C:\deps\duckdb\duckdb_cli.zip -DestinationPath C:\deps\duckdb -Force
+          & C:\deps\duckdb\duckdb.exe --version
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\deps\duckdb"
+
+      - name: Install + proof through easy_install.ps1
+        shell: pwsh
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Real download, verify, install and the LOAD proof. Run under
+          # PS 5.1 (-NoProfile -File), the compatibility contract.
+          $out = & powershell -NoProfile -File `
+              scripts/windows/easy_install.ps1 `
+              -Release "$env:TAG" -DuckDbVersion v1.5.6 2>&1 |
+              Out-String -Width 4096
+          if ("$out" -notmatch "Community") {
+            throw "FAIL: proof output missing Community"
+          }
+          $installed = "$env:USERPROFILE\.duckdb\extensions\v1.5.6\windows_amd64\fractalsql.duckdb_extension"
+          if (-not (Test-Path $installed)) {
+            throw "FAIL: extension not installed into DuckDB's extension directory"
+          }
+          Write-Host "ok: easy_install.ps1 end-to-end install + proof"

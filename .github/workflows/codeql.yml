@@ -1,17 +1,14 @@
 name: CodeQL
 
-# DuckDB extensions are built via DuckDB's complex out-of-tree CMake
-# flow that downloads DuckDB sources per-version. Autobuild on the
-# runner without that pipeline wired up will not succeed, so we use
-# build-mode: none and rely on CodeQL's source-only analysis for C++
-# — still catches the bulk of interesting issues (tainted inputs,
-# buffer overflows on literal arrays, iterator invalidation).
+# The extension is C (a plain make, no DuckDB source), and the MCP server under mcp/ is C++. CodeQL's source-only
+# analysis (build-mode: none) covers both without wiring a build into the analysis -- it still catches the bulk of
+# interesting issues (tainted inputs, buffer overflows on literal arrays, iterator invalidation).
 
 on:
   push:
-    branches: [main]
+    branches: [main, '2.x']
   pull_request:
-    branches: [main]
+    branches: [main, '2.x']
   schedule:
     - cron: '43 3 * * 1'
 
@@ -20,10 +17,14 @@ permissions:
   security-events: write
   actions: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     name: Analyze ${{ matrix.language }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

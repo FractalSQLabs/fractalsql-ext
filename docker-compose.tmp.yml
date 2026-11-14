@@ -1,0 +1,181 @@
+# docker-compose.tmp.yml -- TEMPORARY local demo stack for Docker
+# Desktop desktop runs (not wired into CI; delete this file and
+# ./tmp-demo-ext when done playing).
+#
+# What you get
+#   extension-build -- runs docker/Dockerfile's builder stage and drops
+#       the linux_amd64 cell into ./tmp-demo-ext/ on your host (cold
+#       build ~15-30 min; re-runs take ~1-2 min via BuildKit cache
+#       mounts). Skip it if you already have the cell built.
+#   chat -- interactive duckdb CLI in CHAT reasoning mode
+#       (fractal_reason, fractal_text_to_sql, ...) pointed at a LAN
+#       Ollama.
+#   embed -- interactive duckdb CLI in EMBEDDING mode (fractal_embed,
+#       the vectorizer). The extension keeps chat and embeddings in
+#       separate tiers, each with its own plugin context, so one
+#       process serves both -- the two shells below differ only in
+#       which tier is exercised first.
+#   demo -- runs one demo/*.sql script headlessly in chat-mode env; pass
+#       DEMO_SCRIPT to pick another script.
+#
+# One-time (or after a src/ change):
+#   docker compose -f docker-compose.tmp.yml --profile build run --rm extension-build
+# Interactive shells:
+#   docker compose -f docker-compose.tmp.yml run --rm chat
+#   docker compose -f docker-compose.tmp.yml run --rm embed
+# Iceberg lakehouse demo (writes ./tmp-lake, then run demo-lakehouse-iceberg.sql):
+#   docker compose -f docker-compose.tmp.yml --profile lake run --rm lake-fixture
+#   docker compose -f docker-compose.tmp.yml run --rm -e DEMO_SCRIPT=/demo/demo-lakehouse-iceberg.sql demo
+# DuckLake lakehouse demo (same ./tmp-lake; writes ./tmp-lake/ducklake):
+#   docker compose -f docker-compose.tmp.yml --profile lake run --rm ducklake-fixture
+#   docker compose -f docker-compose.tmp.yml run --rm -e DEMO_SCRIPT=/demo/demo-lakehouse-ducklake.sql demo
+# Headless demo:
+#   docker compose -f docker-compose.tmp.yml run --rm demo
+#   docker compose -f docker-compose.tmp.yml run --rm -e DEMO_SCRIPT=/demo/demo-vectorizer.sql demo
+# Cleanup:
+#   docker compose -f docker-compose.tmp.yml down --rmi local
+#   rm -rf ./tmp-demo-ext ./tmp-lake
+#
+# Prereqs: an Ollama instance reachable from containers at the host
+# below ($env:OLLAMA_HOST to override without editing this file; default
+# port 11434) with both models pulled:
+#   ollama pull gpt-oss:20b
+#   ollama pull nomic-embed-text
+# ALLOW_PLAINTEXT=1 is the dev/local-only knob that permits plain-HTTP
+# providers that are not localhost (your LAN Ollama counts).
+
+name: fractalsql-ext-demo-tmp
+
+x-duckdb-version: &DUCKDB_VERSION v1.5.6
+x-ext-file: &EXT_FILE fractalsql.v1.5.6.linux_amd64.duckdb_extension
+
+x-chat-env: &chat-env
+  FSQL_REASONING_HTTP_URL: http://${OLLAMA_HOST:-192.168.17.15:11434}/v1/chat/completions
+  FSQL_REASONING_HTTP_MODEL: gpt-oss:20b
+  # The embedding endpoint and its model are set alongside the chat pair:
+  # several demos call fractal_embed as well as fractal_reason, and the
+  # extension keeps the two in separate tiers, so one process serves both.
+  # A chat model is not an embedding model -- the embedding pair points at
+  # the provider's /v1/embeddings route with an embedding model.
+  FSQL_REASONING_HTTP_EMBED_URL: http://${OLLAMA_HOST:-192.168.17.15:11434}/v1/embeddings
+  FSQL_REASONING_HTTP_EMBED_MODEL: nomic-embed-text
+  # Demo only: the reasoning plugin in this image is built locally and carries no
+  # .sig, so the authenticity check would refuse it. A real deployment ships the
+  # signed plugin with its .sig and leaves this unset.
+  FSQL_REASONING_REQUIRE_SIGNATURE: "0"
+  # gpt-oss thinks before streaming: prefill on pipeline prompts (and cold
+  # model loads) exceeds the default 20s low-speed abort window. This is
+  # exactly the constrained-hardware recipe from docs/reasoning-setup.md.
+  FSQL_REASONING_HTTP_TIMEOUT_MS: "330000"
+  FSQL_REASONING_HTTP_LOW_SPEED_SECS: "300"
+  FSQL_REASONING_HTTP_ALLOW_PLAINTEXT: "1"
+
+x-embed-env: &embed-env
+  FSQL_REASONING_HTTP_MODE: embedding
+  FSQL_REASONING_HTTP_EMBED_URL: http://${OLLAMA_HOST:-192.168.17.15:11434}/v1/embeddings
+  FSQL_REASONING_HTTP_EMBED_MODEL: nomic-embed-text
+  FSQL_REASONING_REQUIRE_SIGNATURE: "0"
+  FSQL_REASONING_HTTP_TIMEOUT_MS: "330000"
+  FSQL_REASONING_HTTP_LOW_SPEED_SECS: "300"
+  FSQL_REASONING_HTTP_ALLOW_PLAINTEXT: "1"
+
+x-demo-build: &demo-build
+  context: .
+  dockerfile: docker/Dockerfile.demo
+  args:
+    DUCKDB_VERSION: *DUCKDB_VERSION
+    EXT_FILE: *EXT_FILE
+
+x-demo-volumes: &demo-volumes
+  - ./tmp-demo-ext:/ext:ro
+  - ./tmp-lake:/lake:ro
+  - ./demo:/demo:ro
+
+services:
+  extension-build:
+    profiles: ["build"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: builder
+      args:
+        DUCKDB_VERSION: *DUCKDB_VERSION
+    volumes:
+      - ./tmp-demo-ext:/out
+    command:
+      - sh
+      - -c
+      - |
+        cp /fractalsql.duckdb_extension /out/${EXT_FILE:-fractalsql.v1.5.6.linux_amd64.duckdb_extension} && \
+        ls -l /out && \
+        echo extended cell extracted to ./tmp-demo-ext/ -- the demo services will load it
+
+  # Writes the Iceberg fixture that demo-lakehouse-iceberg.sql reads.
+  # Run once: docker compose -f docker-compose.tmp.yml --profile lake run --rm lake-fixture
+  lake-fixture:
+    profiles: ["lake"]
+    image: python:3.12-slim@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
+    environment:
+      LAKE_DIR: /lake
+    volumes:
+      - ./tmp-lake:/lake
+      - ./demo:/demo:ro
+    working_dir: /demo
+    command:
+      - sh
+      - -c
+      - pip install -q pyiceberg pyarrow sqlalchemy && python lakehouse/make_iceberg_fixture.py
+
+  # Writes the DuckLake fixture that demo-lakehouse-ducklake.sql reads.
+  ducklake-fixture:
+    profiles: ["lake"]
+    build: *demo-build
+    image: fractalsql-ext-demo:tmp
+    volumes:
+      - ./tmp-demo-ext:/ext:ro
+      - ./tmp-lake:/lake
+      - ./demo:/demo:ro
+    working_dir: /demo
+    command:
+      - sh
+      - -c
+      - mkdir -p /lake/ducklake/data && duckdb -unsigned -bail -init /opt/fractalsql/init.sql < /demo/lakehouse/make_ducklake_fixture.sql
+
+  chat:
+    build: *demo-build
+    image: fractalsql-ext-demo:tmp
+    stdin_open: true
+    tty: true
+    environment: *chat-env
+    volumes: *demo-volumes
+    working_dir: /work
+    tmpfs:
+      - /work
+
+  embed:
+    build: *demo-build
+    image: fractalsql-ext-demo:tmp
+    stdin_open: true
+    tty: true
+    environment: *embed-env
+    volumes: *demo-volumes
+    working_dir: /work
+    tmpfs:
+      - /work
+
+  demo:
+    build: *demo-build
+    image: fractalsql-ext-demo:tmp
+    environment: *chat-env
+    volumes: *demo-volumes
+    # The scripts live in the read-only /demo mount, but two of them hand
+    # a generated statement to the next one through a file in the working
+    # directory (the CLI's .output/.read pair), so the working directory
+    # has to be writable. It is a tmpfs: nothing lands in the checkout.
+    working_dir: /work
+    tmpfs:
+      - /work
+    command:
+      - sh
+      - -lc
+      - duckdb -unsigned -bail -init /opt/fractalsql/init.sql < "$${DEMO_SCRIPT:-/demo/demo.sql}"
