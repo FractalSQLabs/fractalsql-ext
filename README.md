@@ -77,7 +77,9 @@ Depending on your role, you'll want to start in different places:
   [Starter Kit](docs/starter-kits.md).
 
 ## 🧩 What's in the box
-
+<p align="center">
+  <img src="docs/fractalsql-ext-architecture.jpg" alt="FractalSQL .duckdb_extension diagram" width="900">
+</p>
 Four tiers of SQL-callable primitives, composable into agents with plain SQL
 and application code, with no server-side language required.
 
