@@ -198,14 +198,16 @@ what this build's in-memory, per-connection ledger can and can't prove.
 
 ## 📊 Compatibility & License
 
-| DuckDB | Linux | Windows | macOS |
-| --- | :---: | :---: | :---: |
-| 1.4.5 | ✓ | ✓ | ✓ |
-| 1.5.6 | ✓ | ✓ | ✓ |
-| 2.0.0 | ✓ | ✓ | ✓ |
+| DuckDB | Linux amd64 | Linux arm64 | Windows x64 | macOS |
+| --- | :---: | :---: | :---: | :---: |
+| 1.4 | ✓ | ✓ | ✓ | ✓ |
+| 1.5 | ✓ | ✓ | ✓ | ✓ |
+| 2.0 | ✓ | ✓ | ✓ | ✓ |
 
-The latest patch release of each DuckDB line is supported. DuckDB 1.5.6 and
-2.0.0 load the same stable-API build; DuckDB's 1.4 line has an unstable
+macOS builds cover Apple Silicon and Intel.
+
+The latest patch release of each DuckDB line is supported. DuckDB 1.5 and
+2.0 load the same stable-API build; DuckDB's 1.4 line has an unstable
 extension API, so its build is tied to one 1.4.x release. The file name includes
 the DuckDB version, and DuckDB refuses to load a 1.4 build on a different
 version.
