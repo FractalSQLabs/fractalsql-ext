@@ -9,7 +9,7 @@
 #
 #   fractalsql.v1.4.5.linux_<arch>.duckdb_extension   1.4 band (C_STRUCT_UNSTABLE): exactly DuckDB 1.4.5
 #   fractalsql.v1.5.6.linux_<arch>.duckdb_extension   stable band (C_STRUCT, v1.5.6 header)
-#   fractalsql.v2.0.0.linux_<arch>.duckdb_extension   the same stable-band file: it loads on 2.0.0 as well
+#   fractalsql.v2.0.1.linux_<arch>.duckdb_extension   the same stable-band file: it loads on 2.0.0 as well
 #
 # Two builds, not three: the stable-API band is one binary that DuckDB 1.5.6 and 2.0.0 both accept, so those two
 # cells are copies of it. The 1.4 line has an unstable API and gets a build of its own, tied to one 1.4.N

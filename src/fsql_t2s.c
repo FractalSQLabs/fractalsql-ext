@@ -483,9 +483,7 @@ static int generate_and_validate(fsql_instance *inst, const char *question, char
             int g = fsql_reasoning_generate(FSQL_REASONING_TIER_REVIEW, fsql_sb_cstr(&rp), strlen(fsql_sb_cstr(&rp)), "{}", 2, &critique, err, errcap);
             fsql_sb_free(&rp);
             if (g != FSQL_REASONING_OK) goto out;
-            size_t i = 0, cl = strlen(critique);
-            while (i < cl && isspace((unsigned char)critique[i])) i++;
-            bool pass = fsql_ieq_at(critique, cl, i, "PASS");
+            bool pass = fsql_review_passed(critique);
             if (!pass) { set_feedback(res, critique); res->kind = T2S_REVIEW_FAILED; free(critique); continue; }
             free(critique);
         }

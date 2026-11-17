@@ -95,7 +95,7 @@ jobs:
 
           # Assert expected outputs.
           grep -q "Community" /tmp/smoke.out || { echo "FAIL: edition != Community"; exit 1; }
-          grep -q "2.0.0"     /tmp/smoke.out || { echo "FAIL: version != 2.0.0"; exit 1; }
+          grep -q "2.0.1"     /tmp/smoke.out || { echo "FAIL: version != 2.0.1"; exit 1; }
           # dist_to_self should be a small positive number; the SFS
           # refines the query and dist_to_self is cosine_distance to
           # the refined point. Expect strictly < 1.0 (otherwise either
@@ -113,7 +113,7 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/fetch_duckdb.sh cli v2.0.0 linux amd64 /tmp/duckdb-2.0.0
-          EXT_ABS="$(readlink -f dist/amd64/fractalsql.v2.0.0.linux_amd64.duckdb_extension)"
+          EXT_ABS="$(readlink -f dist/amd64/fractalsql.v1.5.6.linux_amd64.duckdb_extension)"
           /tmp/duckdb-2.0.0/duckdb -unsigned -c "
             LOAD '$EXT_ABS';
             SELECT fractal_edition() AS edition;
@@ -121,7 +121,7 @@ jobs:
             SELECT fractal_search([1.0, 0.0, 0.0, 0.0]::DOUBLE[], [1.0, 0.0, 0.0, 0.0]::DOUBLE[]) AS dist_to_self;
           " | tee /tmp/smoke200.out
           grep -q "Community" /tmp/smoke200.out || { echo "FAIL: edition != Community on 2.0.0"; exit 1; }
-          grep -q "2.0.0"     /tmp/smoke200.out || { echo "FAIL: version != 2.0.0 on 2.0.0"; exit 1; }
+          grep -q "2.0.1"     /tmp/smoke200.out || { echo "FAIL: version != 2.0.1 on 2.0.0"; exit 1; }
           grep -qE '^(\||│) +[0-9]' /tmp/smoke200.out || { echo "FAIL: no numeric result row on 2.0.0"; exit 1; }
           echo "ok: the extension loads and answers on DuckDB 2.0.0"
 
@@ -241,7 +241,7 @@ jobs:
           " | tee /tmp/smoke.out
 
           grep -q "Community" /tmp/smoke.out || { echo "FAIL: edition != Community"; exit 1; }
-          grep -q "2.0.0"     /tmp/smoke.out || { echo "FAIL: version != 2.0.0"; exit 1; }
+          grep -q "2.0.1"     /tmp/smoke.out || { echo "FAIL: version != 2.0.1"; exit 1; }
           grep -qE '^(\||│) +[0-9]' /tmp/smoke.out \
             || { echo "FAIL: no numeric result row from fractal_search"; exit 1; }
           echo "ok: Rocky 9 + extension + smoke SQL"
@@ -467,17 +467,17 @@ jobs:
             || { echo "FAIL: --no-mcp must skip the MCP server"; exit 1; }
 
           # A stamped script (release.yml replaces @@FSQL_VERSION@@ with the tag's version) installs its own release.
-          sed "s/@@FSQL_VERSION@@/2.0.0/" scripts/easy_install.sh > /tmp/easy_install_stamped.sh
+          sed "s/@@FSQL_VERSION@@/2.0.1/" scripts/easy_install.sh > /tmp/easy_install_stamped.sh
           bash /tmp/easy_install_stamped.sh --dry-run --yes --duckdb-version v1.5.6 --platform linux_amd64 2>&1 | tee /tmp/dry_stamped.out
-          grep -q "releases/download/v2.0.0/fractalsql-ext-v1.5.6-linux_amd64.tar.gz" /tmp/dry_stamped.out \
+          grep -q "releases/download/v2.0.1/fractalsql-ext-v1.5.6-linux_amd64.tar.gz" /tmp/dry_stamped.out \
             || { echo "FAIL: a stamped script must default to its own release tag and fetch the bundle"; exit 1; }
           grep -q "releases/latest/download" /tmp/dry1.out \
             || { echo "FAIL: an unstamped script must default to the latest release"; exit 1; }
 
           # The --with-reasoning path (fetches nothing in dry-run) through
           # a pinned release tag.
-          scripts/easy_install.sh --dry-run --with-reasoning --release v2.0.0 2>&1 | tee /tmp/dry2.out
-          grep -q "would download: https://github.com/FractalSQLabs/fractalsql-ext/releases/download/v2.0.0/fractalsql-ext-v1.5.6-linux_amd64.tar.gz" /tmp/dry2.out \
+          scripts/easy_install.sh --dry-run --with-reasoning --release v2.0.1 2>&1 | tee /tmp/dry2.out
+          grep -q "would download: https://github.com/FractalSQLabs/fractalsql-ext/releases/download/v2.0.1/fractalsql-ext-v1.5.6-linux_amd64.tar.gz" /tmp/dry2.out \
             || { echo "FAIL: the bundle release-asset URL not surfaced in dry-run output"; exit 1; }
           grep -q "would install fractalsql-reasoning-http.so and fractalsql-reasoning-http.so.sig" /tmp/dry2.out \
             || { echo "FAIL: the reasoning plugin and its .sig must be installed from the bundle"; exit 1; }

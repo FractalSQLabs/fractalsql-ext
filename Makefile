@@ -46,7 +46,7 @@ PLATFORM ?= $(PLAT_OS)_$(PLAT_ARCH)
 
 # Sources. The real extension; `make SRC=test/spike/fsql_spike.c CORE_LIB=` builds the P0 spike.
 SRC     ?= src/fractalsql_ext.c src/fsql_duck.c src/fsql_buf.c src/fsql_vector.c src/fsql_sovereign.c src/fsql_enterprise.c src/fsql_reasoning.c src/fsql_config.c src/fsql_ledger.c src/fsql_parse.c src/fsql_t2s.c src/fsql_vectorizer.c src/fsql_agents.c src/fsql_domain_agents.c
-EXTVER  ?= v2.0.0
+EXTVER  ?= v2.0.1
 L_VERSION ?= v1.4.5
 COV     ?=
 OUT     ?= dist/$(if $(SAN),san-$(SAN),$(if $(COV),cov,$(PLATFORM)))

@@ -40,7 +40,7 @@ LOAD '/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension';
 -- Verify registration.
 -- ----------------------------------------------------------------------
 SELECT fractal_edition();   -- 'Community'
-SELECT fractal_version();   -- '2.0.0'
+SELECT fractal_version();   -- '2.0.1'
 
 -- ----------------------------------------------------------------------
 -- Basic call.

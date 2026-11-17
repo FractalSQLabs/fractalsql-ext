@@ -13,7 +13,7 @@ SELECT fractal_release(), fractal_release();
 SELECT fractal_release();
 SELECT fractal_schema_context();
 
--- expect: 2.0.0
+-- expect: 2.0.1
 SELECT fractal_release();
 SELECT fractal_version();
 
@@ -32,7 +32,7 @@ SELECT * FROM fractal_search_telemetry('docs', 'v', [0.1, 0.2, 0.3]::DOUBLE[], 3
 
 -- off: everything that needs no nested query still works
 -- env: FRACTALSQL_NESTED_QUERIES=off
--- expect: 2.0.0
+-- expect: 2.0.1
 SELECT fractal_version();
 
 -- env: FRACTALSQL_NESTED_QUERIES=off

@@ -14,7 +14,7 @@
  *
  * Registered here (smoke + search surface):
  *   fractal_edition() -> VARCHAR        "Community"
- *   fractal_version() -> VARCHAR        "2.0.0"
+ *   fractal_version() -> VARCHAR        "2.0.1"
  *   fractal_search(query [, iterations [, population_size [, diffusion]]])
  *                                          -> DOUBLE[]  (the best point)
  *   fractal_search(vec, query)             -> DOUBLE    (cosine distance to it)

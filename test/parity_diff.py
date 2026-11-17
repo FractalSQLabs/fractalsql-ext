@@ -93,14 +93,14 @@ def run(cli, ext, sql, san=False, extra_env=None, release=False):
         env["ASAN_OPTIONS"] = "detect_leaks=0:abort_on_error=0:halt_on_error=1"
         env["UBSAN_OPTIONS"] = "print_stacktrace=1:halt_on_error=1"
     cmd = [cli, "-unsigned", "-csv", "-noheader", "-bail"]
-    p = run_cli(cmd, input=script, capture_output=True, text=True, env=env, timeout=900)
+    p = run_cli(cmd, input=script, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=900)
     if release and p.returncode == -11:
         # A script that ends on an error exits under -bail before it can release, and a DuckDB 2.x CLI can crash at
         # exit if the extension's monitor is mid-query (see RELEASE_MARK). That crash is nondeterministic, so run
         # the script once more; a crash that repeats still fails the comparison. Every retry is counted and printed.
         global EXIT_RETRIES
         EXIT_RETRIES += 1
-        p = run_cli(cmd, input=script, capture_output=True, text=True, env=env, timeout=900)
+        p = run_cli(cmd, input=script, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=900)
     if san and SAN and ("Sanitizer" in p.stderr or "runtime error" in p.stderr):
         return "SANITIZER-REPORT\n" + p.stderr[:1500]
     # "hint: -agent" is CLI noise. The unsigned-plugin notice is a deliberate product message (the harness opts its

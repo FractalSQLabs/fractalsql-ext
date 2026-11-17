@@ -952,7 +952,7 @@ static void optimize_portfolio_fn(duckdb_function_info info, duckdb_data_chunk i
         if (!fsql_valid(kvv, i)) { fsql_fn_error(info, "fractalsql: k must not be NULL"); goto done; }
         int32_t k32 = kv[i];
         size_t n_assets = mn;
-        if (cn != n_assets * n_assets) {
+        if (n_assets > 8192 || cn != n_assets * n_assets) {   /* bounded so n*n cannot wrap (SECURITY_AUDIT.md 3.15) */
             fsql_fn_error(info, "fractalsql: cov length (%zu) must be n_assets^2 (n_assets=%zu, expected %zu)", cn, n_assets, n_assets * n_assets);
             goto done;
         }

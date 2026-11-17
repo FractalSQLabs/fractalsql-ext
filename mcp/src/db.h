@@ -21,7 +21,7 @@ struct _duckdb_database; struct _duckdb_connection;
 namespace fsqlmcp
 {
     static const char* const kMcpPluginName       = "fractalsql-ext-mcp";
-    static const char* const kEngineVersionExpect = "2.0.0";
+    static const char* const kEngineVersionExpect = "2.0.1";
 
     // A value bound to a `?` parameter. Lists are bound as DOUBLE / BIGINT / VARCHAR / BLOB lists and the
     // statement's CAST(? AS ...) narrows them to what the function wants.

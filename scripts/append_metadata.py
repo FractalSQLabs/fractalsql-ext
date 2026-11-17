@@ -17,7 +17,7 @@ Metadata field mapping (matches the cmake script):
     META1 = literal '4'                  metadata format version
     META2 = platform                     e.g. 'linux_amd64_gcc4'
     META3 = duckdb version               e.g. 'v1.1.3'
-    META4 = extension version            e.g. 'v2.0.0'
+    META4 = extension version            e.g. 'v2.0.1'
     META5 = ABI type                     '' for C++ extensions,
                                          'C_STRUCT' for C-API extensions
     META6..8 = empty
@@ -27,7 +27,7 @@ Usage:
         --extension path/to/fractalsql.duckdb_extension \\
         --platform linux_amd64_gcc4 \\
         --duckdb-version v1.1.3 \\
-        --extension-version v2.0.0
+        --extension-version v2.0.1
 """
 
 import argparse

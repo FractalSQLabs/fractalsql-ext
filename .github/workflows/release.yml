@@ -181,7 +181,7 @@ jobs:
           DUCKDB_VERSION: ${{ matrix.duckdb_version }}
         run: |
           set -euo pipefail
-          VERSION="2.0.0"
+          VERSION="2.0.1"
           DIST_DIR="dist/packages"
           mkdir -p "${DIST_DIR}"
           EXT_NAME="fractalsql.${DUCKDB_VERSION}.${{ matrix.platform_tag }}.duckdb_extension"
@@ -255,7 +255,7 @@ jobs:
           DUCKDB_VERSION: ${{ matrix.duckdb_version }}
         run: |
           $ErrorActionPreference = "Stop"
-          $VERSION = "2.0.0"
+          $VERSION = "2.0.1"
           $DIST_DIR = "dist/packages"
           New-Item -ItemType Directory -Force -Path $DIST_DIR | Out-Null
           $EXT_NAME = "fractalsql.$env:DUCKDB_VERSION.windows_amd64.duckdb_extension"

@@ -84,7 +84,7 @@ if "%SANMODE%"=="undefined" (
 REM The extension: every translation unit under src\, linked with the vendored static core.
 if not defined SRC set "SRC=src\fractalsql_ext.c src\fsql_duck.c src\fsql_buf.c src\fsql_vector.c src\fsql_sovereign.c src\fsql_enterprise.c src\fsql_reasoning.c src\fsql_config.c src\fsql_ledger.c src\fsql_parse.c src\fsql_t2s.c src\fsql_vectorizer.c src\fsql_agents.c src\fsql_domain_agents.c"
 if not defined CORE_LIB set "CORE_LIB=include\windows-x86_64\fractalsql-community-sovereign-c.lib"
-if not defined EXTVER set "EXTVER=v2.0.0"
+if not defined EXTVER set "EXTVER=v2.0.1"
 if not defined L_VERSION set "L_VERSION=v1.4.5"
 set "PLATFORM=windows_amd64"
 set "OUT=dist\%PLATFORM%"

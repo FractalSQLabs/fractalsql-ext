@@ -119,6 +119,17 @@ inline void fsqlCloseAfterReply( int fd, int lingerMs )
 
 namespace fsqlmcp
 {
+    // A header the server acts on that arrives twice is refused: two values for the host, the credential, the origin or the
+    // framing are an ambiguity a proxy in front and this parser could resolve differently (SECURITY_AUDIT.md 3.18).
+    static bool isSingleValuedHeader( const std::string& name )
+    {
+        static const char* const kNames[] = { "host", "authorization", "origin", "content-type", "transfer-encoding",
+                                              "mcp-session-id", "mcp-protocol-version", "mcp-method", "mcp-name" };
+        for( const char* n : kNames )
+            if( name == n ) return true;
+        return false;
+    }
+
     static constexpr std::size_t kBodyMax = 32 * 1024 * 1024;
 
     // SIGHUP means "reload the auth token", and that reload is file I/O plus
@@ -969,6 +980,14 @@ namespace fsqlmcp
         sendJson( w, 401, Json{ { "error", presented ? "invalid bearer token" : "missing bearer token" } }, extra );
     }
 
+    // True for an IPv4 address in 127.0.0.0/8, parsed as an address: a name that merely starts with "127." (127.evil.example,
+    // 127.0.0.1.nip.io) is not one (SECURITY_AUDIT.md 3.17).
+    static bool isLoopbackV4( const std::string& host )
+    {
+        in_addr addr{};
+        return inet_pton( AF_INET, host.c_str(), &addr ) == 1 && ( ntohl( addr.s_addr ) >> 24 ) == 127;
+    }
+
     // True when the origin names a loopback host. The host part is what
     // matters: a page served from http://127.0.0.1:3000 is a loopback
     // origin whatever its port.
@@ -989,7 +1008,7 @@ namespace fsqlmcp
         const std::size_t colon = host.rfind( ':' );
         if( colon != std::string::npos ) host = host.substr( 0, colon );
         if( host == "localhost" ) return true;
-        if( host.rfind( "127.", 0 ) == 0 ) return true;
+        if( isLoopbackV4( host ) ) return true;
         return false;
     }
 
@@ -1295,11 +1314,21 @@ namespace fsqlmcp
         std::string h;
         int headerCount = 0;
         bool sawLength = false, sawEncoding = false;
+        std::set<std::string> seenHeaders;
         while( readLine( h, 64 * 1024 ) && !h.empty() )
         {
             if( ++headerCount > kMaxHeaders ) return false;
             std::string lower = h;
             for( char& c : lower ) c = static_cast<char>( std::tolower( static_cast<unsigned char>( c ) ) );
+            {
+                const std::size_t colonAt = lower.find( ':' );
+                if( colonAt != std::string::npos )
+                {
+                    std::string name = lower.substr( 0, colonAt );
+                    while( !name.empty() && ( name.back() == ' ' || name.back() == '\t' ) ) name.pop_back();
+                    if( !seenHeaders.insert( name ).second && isSingleValuedHeader( name ) ) { out.malformed = true; return false; }
+                }
+            }
             if( lower.rfind( "authorization: bearer ", 0 ) == 0 )
                 out.bearer = trimValue( h.substr( 22 ) );
             else if( lower.rfind( "mcp-session-id:", 0 ) == 0 )
@@ -1534,7 +1563,23 @@ namespace fsqlmcp
         if( path == "/healthz" ) { sendStatus( wire, 200, "OK" ); return true; }
         if( path == "/readyz" )
         {
-            const bool ready = readinessProbe();
+            // This route is unauthenticated and the probe is a live query: the result is kept for 5 s so a burst of requests
+            // costs the engine one probe, not one each (SECURITY_AUDIT.md 3.14).
+            static std::mutex probeMu;
+            static std::chrono::steady_clock::time_point probedAt{};
+            static bool probed = false, lastReady = false;
+            bool ready;
+            {
+                std::lock_guard<std::mutex> lk( probeMu );
+                const auto now = std::chrono::steady_clock::now();
+                if( !probed || now - probedAt >= std::chrono::seconds( 5 ) )
+                {
+                    lastReady = readinessProbe();
+                    probedAt = now;
+                    probed = true;
+                }
+                ready = lastReady;
+            }
             sendStatus( wire, ready ? 200 : 503, ready ? "OK" : "Service Unavailable" );
             return true;
         }
@@ -1976,7 +2021,7 @@ namespace fsqlmcp
     // text. Warn always; refuse unless FSQL_MCP_ALLOW_PLAINTEXT_NONLOOPBACK is set.
     static bool hostIsLoopback( const std::string& h )
     {
-        return h.empty() || h == "localhost" || h == "::1" || h.rfind( "127.", 0 ) == 0;
+        return h.empty() || h == "localhost" || h == "::1" || isLoopbackV4( h );
     }
 
     static SSL_CTX* makeSslCtx( const HttpConfig& cfg, std::string& errOut )

@@ -33,8 +33,8 @@ SELECT CASE WHEN fractal_edition() <> 'Community'
             THEN error('fractal_edition() != Community: ' || fractal_edition())
             ELSE 'edition ok' END AS status;
 
-SELECT CASE WHEN fractal_version() <> '2.0.0'
-            THEN error('fractal_version() != 2.0.0: ' || fractal_version())
+SELECT CASE WHEN fractal_version() <> '2.0.1'
+            THEN error('fractal_version() != 2.0.1: ' || fractal_version())
             ELSE 'version ok' END AS status;
 
 -- ----------------------------------------------------------------------

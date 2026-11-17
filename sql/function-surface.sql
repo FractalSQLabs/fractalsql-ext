@@ -17,12 +17,12 @@
 -- See sql/load_extension.sql for the full sequence.
 --
 -- ---------------------------------------------------------------------
--- 2. Function surface (2.0.0, Community sovereign build)
+-- 2. Function surface (2.0.1, Community sovereign build)
 -- ---------------------------------------------------------------------
 --
 -- Smoke + search:
 --   fractal_edition() -> VARCHAR                        -- 'Community'
---   fractal_version() -> VARCHAR                        -- '2.0.0'
+--   fractal_version() -> VARCHAR                        -- '2.0.1'
 --   fractal_search(vector, query) -> DOUBLE                -- Sniper, memoized
 --     (raw-SFS best-point mode overloads:
 --      fractal_search(query[, iterations, population_size,

@@ -26,7 +26,7 @@
 #
 #   <template>              notices template, normally THIRD-PARTY-NOTICES.md
 #   <output>                file to write
-#   <extension-version>     this project's extension version, e.g. 2.0.0
+#   <extension-version>     this project's extension version, e.g. 2.0.1
 #   <duckdb-version>        the DuckDB tag built against, e.g. v1.5.6
 #   <platform-tag>          e.g. linux_amd64
 #   [duckdb-license-file]   optional: the DuckDB tag's LICENSE file,

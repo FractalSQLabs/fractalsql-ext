@@ -35,6 +35,8 @@ void fsql_first_keyword(const char *sql, char *out, size_t cap);
 /* A call to a state-changing extension function anywhere outside string
  * literals and comments, or NULL. */
 const char *fsql_denied_function_call(const char *sql);
+/* true when the review reply is a pass: the word PASS (any case) at the front, not the letters of a longer word */
+bool fsql_review_passed(const char *reply);
 
 /* EXPLAIN (FORMAT json) names its operators as "name": "DELETE" ... */
 bool fsql_plan_has_modifying_operator(const char *json);

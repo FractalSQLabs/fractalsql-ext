@@ -1107,7 +1107,7 @@ gate_01() {
 gate_02() {
   local r rc
   r=$(sqlq "SELECT fractal_version();"); rc=$?
-  expect_ok "$rc" "$r" "fractal_version() reports 2.0.0" "2.0.0"
+  expect_ok "$rc" "$r" "fractal_version() reports 2.0.1" "2.0.1"
   r=$(sqlq "SELECT fractal_edition();"); rc=$?
   expect_ok "$rc" "$r" "fractal_edition() reports Community" "Community"
   # smoke search: identical points converge onto the query point itself
@@ -1209,6 +1209,15 @@ gate_04() {
   t2s_expect "this is not sql at all ##" "is not permitted" err "non-SQL prose refused on its first keyword"
   t2s_expect "123 not a keyword" "statement is empty or does not start with" err "a candidate that does not start with a keyword is refused"
   t2s_expect "SELECT no_such_column FROM bt_orders" "SQL does not parse" err "unknown column surfaces from the EXPLAIN step"
+  # A SELECT of a state-changing extension function is a SELECT to the statement-type check and would still write: the
+  # candidate may not call one, in any spelling DuckDB's parser accepts (a comment or a quoted name before the
+  # parenthesis; a dollar-quoted string, which DuckDB reads as one string, so a lone quote inside it opens nothing).
+  t2s_expect "SELECT fractal_audit_log('x', '{}')" "changes state" err "a state-changing function is refused"
+  t2s_expect "SELECT fractal_audit_log /* c */ ('x', '{}')" "changes state" err "a comment before the parenthesis does not hide the call"
+  t2s_expect 'SELECT "fractal_audit_log"('"'"'x'"'"', '"'"'{}'"'"')' "changes state" err "a quoted identifier does not hide the call"
+  t2s_expect "SELECT \$\$ ' \$\$ , fractal_audit_log('x', '{}')" "changes state" err "a lone quote inside a dollar-quoted string does not hide the call"
+  t2s_expect "SELECT \$t\$ ' \$t\$ , fractal_ledger_flush()" "changes state" err "a tagged dollar-quoted string does not hide the call"
+  t2s_expect "SELECT \$\$fractal_audit_log('x')\$\$ AS s" "-" ok "a denied name inside a dollar-quoted string is only text"
   r=$(sqlq "SELECT count(*) FROM bt_orders;"); rc=$?
   expect_ok "$rc" "$r" "fractal_text_to_sql never executes (bt_orders still empty)" "0"
 
@@ -3409,6 +3418,17 @@ gate_42() {
 gate_52() {
   local cc="" secs="${FSQL_FUZZ_TIME:-30}" w rc
   w="$(mktemp -d "${TMPDIR:-/tmp}/fsql_parsefuzz_XXXXXX")"
+  # The denied-call scan, case by case, in every spelling the SQL parser accepts (a comment or a quoted name before the parenthesis).
+  # A plain C program: it needs no libFuzzer.
+  local ucc; ucc="$(command -v cc || command -v gcc || true)"
+  if [ -n "$ucc" ]; then
+    if "$ucc" -std=c11 -Wall -Wextra -Isrc tests/denied_call_test.c src/fsql_parse.c src/fsql_buf.c -o "$w/denied_call_test" >"$w/denied.log" 2>&1 \
+       && "$w/denied_call_test" >>"$w/denied.log" 2>&1; then
+      pass "52 denied_call: the generated-SQL function denylist catches every spelling of a call"
+    else
+      fail "52 denied_call: a denied function got through; see $w/denied.log"; tail -8 "$w/denied.log" 2>/dev/null | sed 's/^/         /'
+    fi
+  fi
   for c in "${FSQL_FUZZ_CC:-}" clang-19 clang-18 clang-17 clang; do
     [ -n "$c" ] || continue
     command -v "$c" >/dev/null 2>&1 || continue
@@ -3536,6 +3556,8 @@ gate_37() {
   mcp_driver_gate 37 https mcp_https_smoke_client.py MCP_HTTPS_PORT="$port" MCP_HTTPS_CERT="$w/cert.pem" MCP_HTTPS_KEY="$w/key.pem"
 }
 gate_38() { mcp_driver_gate 38 cli mcp_cli.py; }
+# SECURITY_AUDIT.md 3.17, 3.18: the HTTP transport refuses lookalike origins and repeated headers (no engine needed)
+gate_58() { mcp_driver_gate 58 audit_http mcp_audit_http.py; }
 
 # 46 capi_matrix: the pure-C extension. It builds and checks its own files, not the artifact the other
 # gates locate. See test/load_matrix.sh for the
@@ -3746,6 +3768,7 @@ gate_body() {
     55) gate_55 ;;
     56) gate_56 ;;
     57) gate_57 ;;
+    58) gate_58 ;;
   esac
 }
 
@@ -3807,6 +3830,7 @@ gate_name() {
     55) echo "ledger_integrity" ;;
     56) echo "capi_oom" ;;
     57) echo "capi_oom_full" ;;
+    58) echo "mcp_audit_http" ;;
     *) echo "" ;;
   esac
 }
@@ -3856,7 +3880,7 @@ main() {
   if [ -n "${LIST_ONLY:-}" ]; then
     local g
     for g in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 \
-             21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 45 46 47 48 49 50 51 52 53 54 55 56 57; do
+             21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 45 46 47 48 49 50 51 52 53 54 55 56 57 58; do
       printf '  %s  %s\n' "$g" "$(gate_name "$g")"
     done
     exit 0
@@ -3893,13 +3917,13 @@ main() {
 
   local -a to_run=()
   if [ -n "$MCP_ALIAS" ]; then
-    to_run=(35 36 37 38 39 40)        # --gate mcp: the MCP server gates only (42 is --fuzz only,
+    to_run=(35 36 37 38 39 40 58)      # --gate mcp: the MCP server gates only (42 is --fuzz only,
                                        # 41 is a fault gate: --gate mcp --fault adds it)
     [ "$FAULT" = 1 ] && to_run+=(41)
   elif [ -n "$ONE_GATE" ]; then
     to_run=("$ONE_GATE")
   elif [ "$MCP_KIND" = tsan ] || [ "$MCP_KIND" = cov ]; then
-    to_run=(35 36 37 38 39 40)        # --tsan / --coverage: the MCP server gates only
+    to_run=(35 36 37 38 39 40 58)       # --tsan / --coverage: the MCP server gates only
   elif [ "$MODE" = "quick" ]; then
     to_run=(01 02)
   elif [ "$MODE" = "fuzz" ]; then

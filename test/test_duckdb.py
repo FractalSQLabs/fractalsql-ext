@@ -10,7 +10,7 @@ preferred; falls back to a reduced CLI-driven mode when only a `duckdb`
 CLI is available, since some of the STRUCT-returning probes are easier to
 parse in-process) and asserts:
 
-  * edition/version pins (2.0.0 / Community),
+  * edition/version pins (2.0.1 / Community),
   * fractal_search self-distance < 1e-6,
   * the B1-B7 analytic function contracts from the port plan
     (change-point, periodogram, TDA, state fingerprint, cycle detect,
@@ -30,7 +30,7 @@ import os
 import glob
 import sys
 
-EXPECTED_VERSION = "2.0.0"
+EXPECTED_VERSION = "2.0.1"
 EXPECTED_EDITION = "Community"
 
 

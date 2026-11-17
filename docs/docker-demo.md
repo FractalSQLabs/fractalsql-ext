@@ -55,7 +55,7 @@ out as one file per supported DuckDB version:
 ```
 dist/<arch>/fractalsql.v1.4.5.linux_<arch>.duckdb_extension
 dist/<arch>/fractalsql.v1.5.6.linux_<arch>.duckdb_extension
-dist/<arch>/fractalsql.v2.0.0.linux_<arch>.duckdb_extension
+dist/<arch>/fractalsql.v2.0.1.linux_<arch>.duckdb_extension
 ```
 
 Without Docker, `make` builds both bands natively into `dist/<platform>/`
@@ -79,7 +79,7 @@ SELECT fractal_edition(), fractal_version();"
 You should see:
 
 ```
-Community | 2.0.0
+Community | 2.0.1
 ```
 
 **Quick test** (works with no model; base Sniper search needs no LLM):

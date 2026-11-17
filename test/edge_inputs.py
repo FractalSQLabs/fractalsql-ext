@@ -55,7 +55,7 @@ POOL = {
     "BIGINT": ["NULL::BIGINT", "0::BIGINT", "-1::BIGINT", "9223372036854775807::BIGINT"],
     "BOOLEAN": ["NULL::BOOLEAN", "false"],
     "DOUBLE[]": ["NULL::DOUBLE[]", "[]::DOUBLE[]", "[NULL]::DOUBLE[]", "[1.0]::DOUBLE[]", "['NaN'::DOUBLE, 1.0]::DOUBLE[]",
-                 "[1e308, -1e308, 1e308]::DOUBLE[]", "[0.0, 0.0, 0.0]::DOUBLE[]", "list_transform(range(300), x -> x * 0.01)::DOUBLE[]"],
+                 "[1e308, -1e308, 1e308]::DOUBLE[]", "[0.0, 0.0, 0.0]::DOUBLE[]", "list_transform(range(300), lambda x: x * 0.01)::DOUBLE[]"],
     "FLOAT[]": ["NULL::FLOAT[]", "[]::FLOAT[]", "[NULL]::FLOAT[]", "['NaN'::FLOAT]::FLOAT[]", "[0.0, 0.0]::FLOAT[]"],
     "BIGINT[]": ["NULL::BIGINT[]", "[]::BIGINT[]", "[NULL]::BIGINT[]", "[-1, 0, 9223372036854775807]::BIGINT[]"],
     "VARCHAR[]": ["NULL::VARCHAR[]", "[]::VARCHAR[]", "[NULL]::VARCHAR[]", "['']::VARCHAR[]"],

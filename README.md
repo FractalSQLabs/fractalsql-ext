@@ -116,7 +116,7 @@ fully functional and Cognition/Agency return clean precondition errors.
 
 ```
 fractal_edition() -> VARCHAR                     -- 'Community'
-fractal_version() -> VARCHAR                     -- '2.0.0'
+fractal_version() -> VARCHAR                     -- '2.0.1'
 fractal_search(vector DOUBLE[], query DOUBLE[]) -> DOUBLE
 fractal_search_debug(vector, k, max_iter, mdn) -> VARCHAR
 fractal_search_explore(column, query[, options])           -- Scout aggregate
@@ -153,7 +153,7 @@ The file name includes the DuckDB version it targets. See the
 ```sql
 LOAD '/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension';
 SELECT fractal_edition(), fractal_version();
--- returns: ('Community', '2.0.0')
+-- returns: ('Community', '2.0.1')
 ```
 
 3. **Or programmatic (Python / Node / R)**:
@@ -234,7 +234,7 @@ make                # native build -> dist/<platform>/ (Linux and macOS)
 ./build.sh amd64    # in Docker (glibc 2.34 baseline), one file per DuckDB version:
 ./build.sh arm64    #   dist/<arch>/fractalsql.v1.4.5.linux_<arch>.duckdb_extension
                     #   dist/<arch>/fractalsql.v1.5.6.linux_<arch>.duckdb_extension
-                    #   dist/<arch>/fractalsql.v2.0.0.linux_<arch>.duckdb_extension
+                    #   dist/<arch>/fractalsql.v2.0.1.linux_<arch>.duckdb_extension
 ```
 
 On Windows, run `scripts\windows\build.bat` from a Developer Command Prompt

@@ -40,7 +40,7 @@ SELECT fractal_edition(), fractal_version();
 ```
   fractal_edition() | fractal_version()
 ------------------------+------------------------
-       Community        |         2.0.0
+       Community        |         2.0.1
 ```
 
 No `CREATE EXTENSION`, no server restart, no config file -- `LOAD` registers

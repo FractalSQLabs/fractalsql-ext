@@ -118,7 +118,7 @@ T = [
     ('SELECT fractal_tda_persistence_diagram([0.0,0.0, 0.1,0.0, 0.0,0.1, 5.0,5.0]::DOUBLE[], 0, 1, 1.0)', ('E', 'dim must be > 0')),
     ('SELECT fractal_tda_persistence_diagram([0.0,0.0, 0.1,0.0, 0.0,0.1, 5.0,5.0]::DOUBLE[], -1, 1, 1.0)', ('E', 'dim must be > 0')),
     ('SELECT fractal_tda_persistence_diagram([0.0,0.0, 0.1,0.0, 0.0,0.1, 5.0,5.0]::DOUBLE[], 65, 1, 1.0)', ('E', 'dim exceeds cap 64')),
-    ('SELECT fractal_tda_persistence_diagram(list_transform(range(2000002), x -> 0.0)::DOUBLE[], 2, 1, 1.0)', ('E', 'exceeds cap')),
+    ('SELECT fractal_tda_persistence_diagram(list_transform(range(2000002), lambda x: 0.0)::DOUBLE[], 2, 1, 1.0)', ('E', 'exceeds cap')),
     ('SELECT fractal_tda_persistence_diagram([0.0,0.0]::DOUBLE[], 2, 1, 1.0)', ('E', 'rc=')),
     ('SELECT fractal_tda_persistence_diagram([0.0,0.0, 0.1,0.0, 0.0,0.1, 5.0,5.0]::DOUBLE[], 2, 0, 1.0, 8)', ('O', 'h0_bars')),
     ('SELECT fractal_tda_persistence_diagram([0.0,0.0, 0.1,0.0, 0.0,0.1, 5.0,5.0]::DOUBLE[], 2, 1, 1.0, 8)', ('O', 'betti1')),

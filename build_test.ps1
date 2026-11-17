@@ -442,6 +442,81 @@ function out_has { param([string]$s, [string]$want)
   return $s.Contains($want)
 }
 
+# ----------------------------------------------------------------
+# Windows PowerShell 5.1 / PowerShell 7 compatibility.
+#
+# The harness runs on both hosts (#Requires -Version 5.1), so no code
+# path may reach for an API that exists on only one of them. Two did:
+#
+#   ProcessStartInfo.ArgumentList -- a .NET Core collection. On 5.1
+#   the property does not exist at all, so filling it dies with "You
+#   cannot call a method on a null-valued expression". Windows
+#   PowerShell gets the single Arguments string instead, quoted the
+#   way CommandLineToArgvW expects.
+#
+#   Process.Kill(true) -- the .NET Core overload that kills the whole
+#   process tree. On 5.1 the overload does not exist, so the call
+#   throws, and when that happened inside the same try as the wait it
+#   took WaitForExit down with it and left the HTTP stub holding its
+#   port for the rest of the run.
+# ----------------------------------------------------------------
+
+# Quote one argument the way the Windows command line expects it: a
+# run of backslashes before a quote doubles, and a trailing run of
+# backslashes doubles so it does not escape the closing quote.
+function quote_win_arg {
+  param([string]$Arg)
+  if ($null -eq $Arg) { return '""' }
+  if ($Arg -notmatch '[\s"]') { return $Arg }
+  $q = [regex]::Replace($Arg, '(\\*)"', '$1$1\"')
+  $q = [regex]::Replace($q, '(\\+)$', '$1$1')
+  return '"' + $q + '"'
+}
+
+# Append one argument to a ProcessStartInfo, whichever host we are on.
+function add_proc_arg {
+  param($Psi, [string]$Arg)
+  if ($null -ne $Psi.PSObject.Properties["ArgumentList"]) {
+    $Psi.ArgumentList.Add($Arg)
+  } elseif ($Psi.Arguments) {
+    $Psi.Arguments = $Psi.Arguments + " " + (quote_win_arg $Arg)
+  } else {
+    $Psi.Arguments = quote_win_arg $Arg
+  }
+}
+
+# Native stderr captured with 2>&1 arrives as ErrorRecord objects, and
+# the two hosts render them differently: PowerShell 7 prints the
+# record's message, Windows PowerShell 5.1 prints a multi-line block
+# ("prog.exe : msg", then the script position, the CategoryInfo and
+# the FullyQualifiedErrorId). The gates parse that text -- numerify
+# scrapes digits out of it, and an error-text match has to survive it
+# -- so the rendering difference shows up as a gate failure that only
+# happens on one host. Unwrapping every record to its message gives
+# both hosts the same plain text.
+#
+# A filter, not a function: a function's parameters do not take
+# pipeline input unless they say so, so a plain function here would
+# silently swallow the whole capture.
+filter plain_lines {
+  if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message }
+  else { [string]$_ }
+}
+
+# Stop a process and wait for it, killing the tree where the runtime
+# supports it. The wait gets its own try: a failed kill must not leave
+# the caller with a live child.
+function stop_proc {
+  param($Proc, [int]$TimeoutMs = 5000)
+  if (-not $Proc) { return }
+  try {
+    if (-not $Proc.HasExited) {
+      if ($null -ne $Proc.GetType().GetMethod("Kill", [type[]]@([bool]))) { $Proc.Kill($true) } else { $Proc.Kill() }
+    }
+  } catch { }
+  try { $Proc.WaitForExit($TimeoutMs) | Out-Null } catch { }
+}
+
 # Sanitizer-run sweep: any sanitizer diagnostic in captured CLI output
 # fails the invoking gate. Gates 06/18 opt out via SAN_EXEMPT for their
 # single deliberate-crash call: an ASan-instrumented module turns the
@@ -613,9 +688,9 @@ function resolve_python {
     if ($NeedDuckdb) {
       # the drivers require the pip duckdb package; probe and downgrade
       # to a clean [SKIP] when absent rather than failing late.
-      $null = & $c.Source -c "import duckdb" 2>&1
+      $null = & $c.Source -c "import duckdb" 2>&1 | plain_lines
     } else {
-      $null = & $c.Source -c "import sys; print(sys.version_info[0])" 2>&1
+      $null = & $c.Source -c "import sys; print(sys.version_info[0])" 2>&1 | plain_lines
     }
     if ($LASTEXITCODE -eq 0) { return $c.Source }
   }
@@ -738,7 +813,7 @@ function find_toolchain {
     }
   }
   $ok = $false
-  $null = ("SELECT 1;" | & $script:DUCK -batch -unsigned 2>&1)
+  $null = ("SELECT 1;" | & $script:DUCK -batch -unsigned 2>&1 | plain_lines)
   if ($LASTEXITCODE -eq 0) { $ok = $true }
   if (-not $ok) { die ($script:DUCK + " is not a working duckdb CLI") }
 
@@ -931,7 +1006,7 @@ function rebuild_extension {
   $lines += ('call "' + $bat + '"')
   $lines += 'exit /b %ERRORLEVEL%'
   [IO.File]::WriteAllLines($boot, $lines)
-  & cmd.exe /c $boot 2>&1 | ForEach-Object { [string]$_ } | Out-Host
+  & cmd.exe /c $boot 2>&1 | plain_lines | Out-Host
   return ($LASTEXITCODE -eq 0)
 }
 
@@ -1045,8 +1120,9 @@ function Build-SanCell {
   Write-Host ''
   # Out-Host terminates the pipeline: cmd's stderr (2>&1 arrives as
   # ErrorRecords) must not leak into this function's output stream --
-  # the caller assigns it straight into $script:EXT.
-  & cmd.exe /c $boot 2>&1 | ForEach-Object { [string]$_ } | Tee-Object -FilePath $buildLog | Out-Host
+  # the caller assigns it straight into $script:EXT. plain_lines also
+  # keeps the log identical on both hosts.
+  & cmd.exe /c $boot 2>&1 | plain_lines | Tee-Object -FilePath $buildLog | Out-Host
   if ($LASTEXITCODE -ne 0) {
     throw ("the " + $Mode + " extension build failed (full output: " + $buildLog + ")")
   }
@@ -1143,7 +1219,7 @@ function sqlq_env {
     Remove-ProcessEnvVar $k
   }
   try {
-    $raw = (Get-Content $sqlfile -Raw | & $script:DUCK @cliArgs 2>&1 | Out-String -Width 8192)
+    $raw = (Get-Content $sqlfile -Raw | & $script:DUCK @cliArgs 2>&1 | plain_lines | Out-String -Width 8192)
     $script:SQLQ_OUT = [string]$raw
     if ($script:SQLQ_OUT.EndsWith([Environment]::NewLine)) {
       $script:SQLQ_OUT = $script:SQLQ_OUT.TrimEnd()
@@ -1268,7 +1344,7 @@ function py_run {
   [Environment]::SetEnvironmentVariable("FSQL_BT_DB", $script:DB, "Process")
   [Environment]::SetEnvironmentVariable("FSQL_BT_EXT", $script:EXT_SLASH, "Process")
   try {
-    $raw = (& $script:PY $scriptPath 2>&1 | Out-String -Width 8192)
+    $raw = (& $script:PY $scriptPath 2>&1 | plain_lines | Out-String -Width 8192)
     $script:SQLQ_OUT = [string]$raw
     $script:SQLQ_RC = $LASTEXITCODE
   } finally {
@@ -1403,7 +1479,7 @@ function gate_01 {
 
 function gate_02 {
   $r = sqlq "SELECT fractal_version();"; $rc = $script:SQLQ_RC
-  expect_ok $rc $r "fractal_version() reports 2.0.0" "2.0.0"
+  expect_ok $rc $r "fractal_version() reports 2.0.1" "2.0.1"
   $r = sqlq "SELECT fractal_edition();"; $rc = $script:SQLQ_RC
   expect_ok $rc $r "fractal_edition() reports Community" "Community"
   # smoke search: identical points converge onto the query point itself
@@ -1469,7 +1545,7 @@ function gate_03 {
   $emptydb = Join-Path $script:BTROOT ("fractalsql_bt_empty_" + [guid]::NewGuid().ToString("N") + ".db")
   $sqlfile = Join-Path ([IO.Path]::GetTempPath()) ("fsql_bt_" + [guid]::NewGuid().ToString("N") + ".sql")
   [IO.File]::WriteAllText($sqlfile, ("LOAD '" + $script:EXT_SLASH + "';`nSELECT fractal_schema_context();"))
-  $raw = (Get-Content $sqlfile -Raw | & $script:DUCK -bail -batch -list -noheader -unsigned @($script:DUCK_ARGS) $emptydb 2>&1 | Out-String -Width 8192)
+  $raw = (Get-Content $sqlfile -Raw | & $script:DUCK -bail -batch -list -noheader -unsigned @($script:DUCK_ARGS) $emptydb 2>&1 | plain_lines | Out-String -Width 8192)
   $rc = $LASTEXITCODE
   Remove-Item -LiteralPath $sqlfile -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $emptydb -Force -ErrorAction SilentlyContinue
@@ -1621,7 +1697,7 @@ function gate_06 {
   $out = ""
   while ((Get-Date) -lt $deadline) {
     $out = (& $script:DUCK -bail -batch -list @($script:DUCK_ARGS) $script:DB "SELECT count(*) FROM bt_crash_canary;" 2>&1 |
-            Out-String -Width 8192).TrimEnd()
+            plain_lines | Out-String -Width 8192).TrimEnd()
     if ($LASTEXITCODE -eq 0) { $recovered = $true; break }
     Start-Sleep -Seconds 1
   }
@@ -2085,7 +2161,7 @@ function gate_18 {
   $out = ""
   while ((Get-Date) -lt $deadline) {
     $out = (& $script:DUCK -bail -batch -list @($script:DUCK_ARGS) $script:DB "SELECT count(*) FROM bt_vcrash;" 2>&1 |
-            Out-String -Width 8192).TrimEnd()
+            plain_lines | Out-String -Width 8192).TrimEnd()
     if ($LASTEXITCODE -eq 0) { $recovered = $true; break }
     Start-Sleep -Seconds 1
   }
@@ -3346,7 +3422,7 @@ function RunVerticalKit([string]$k) {
   try {
     Push-Location -LiteralPath $kdir
     try {
-      return [string](Get-Content $kf -Raw | & $script:DUCK -batch -list -noheader -unsigned @($script:DUCK_ARGS) -separator "|" 2>&1 | Out-String -Width 8192)
+      return [string](Get-Content $kf -Raw | & $script:DUCK -batch -list -noheader -unsigned @($script:DUCK_ARGS) -separator "|" 2>&1 | plain_lines | Out-String -Width 8192)
     } finally {
       Pop-Location
     }
@@ -3542,10 +3618,10 @@ function start_http_stub {
   # stderr is deliberately NOT redirected: an inherited stderr cannot
   # deadlock the stub on a full pipe, and a python traceback is worth
   # seeing in the log.
-  $psi.ArgumentList.Add("-I")
-  $psi.ArgumentList.Add($stubSrc)
-  $psi.ArgumentList.Add($Reply)
-  $psi.ArgumentList.Add("--embed-dim=$EmbedDim")
+  add_proc_arg $psi "-I"
+  add_proc_arg $psi $stubSrc
+  add_proc_arg $psi $Reply
+  add_proc_arg $psi "--embed-dim=$EmbedDim"
   $proc = $null
   try { $proc = [System.Diagnostics.Process]::Start($psi) } catch { return $null }
   if (-not $proc) { return $null }
@@ -3563,10 +3639,7 @@ function start_http_stub {
 function stop_http_stub {
   param($Stub)
   if (-not $Stub) { return }
-  try {
-    if (-not $Stub.Proc.HasExited) { $Stub.Proc.Kill($true) }
-    $Stub.Proc.WaitForExit(5000) | Out-Null
-  } catch { }
+  stop_proc $Stub.Proc 5000
   try { $Stub.Proc.Dispose() } catch { }
 }
 
@@ -3719,7 +3792,7 @@ function gate_45 {
   $old = @{}
   foreach ($k in $vars.Keys) { $old[$k] = [Environment]::GetEnvironmentVariable($k, "Process"); [Environment]::SetEnvironmentVariable($k, $vars[$k], "Process") }
   try {
-    $o = (& $script:PYANY -u $driver 2>&1 | Out-String -Width 8192)
+    $o = (& $script:PYANY -u $driver 2>&1 | plain_lines | Out-String -Width 8192)
     $rc = $LASTEXITCODE
   } finally {
     foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $old[$k], "Process") }
@@ -3803,7 +3876,7 @@ function mcp_probe_run {
   $exe = Join-Path $script:MCP_DIR_OUT ($probe + ".exe")
   $env:FSQL_DUCKDB_EXTENSION = $script:EXT
   $env:PATH = $script:MCP_DIR_OUT + ";" + $env:PATH
-  $o = (& $exe 2>&1 | Out-String)
+  $o = (& $exe 2>&1 | plain_lines | Out-String)
   $rc = $LASTEXITCODE
   if ($rc -eq 0) { pass ($num + " mcp: " + $probe) }
   else { ($o -split "`n" | Where-Object { $_ -match '^FAIL' } | Select-Object -First 5) | ForEach-Object { Write-Host "    $_" }; fail ($num + " mcp: " + $probe + " reported a failure") }
@@ -3827,7 +3900,7 @@ function mcp_driver_gate {
   $old = @{}
   foreach ($k in $vars.Keys) { $old[$k] = [Environment]::GetEnvironmentVariable($k, "Process"); [Environment]::SetEnvironmentVariable($k, $vars[$k], "Process") }
   try {
-    $o = (& $script:PYANY (Join-Path $script:HERE ("mcp\tests\" + $script_)) 2>&1 | Out-String -Width 8192)
+    $o = (& $script:PYANY (Join-Path $script:HERE ("mcp\tests\" + $script_)) 2>&1 | plain_lines | Out-String -Width 8192)
     $rc = $LASTEXITCODE
   } finally {
     foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $old[$k], "Process") }
@@ -3845,7 +3918,7 @@ function mcp_driver_gate {
 
 function gate_35 {
   if (-not (mcp_build)) { return }
-  pass ("35 mcp: fractalsql-ext-mcp.exe built (" + (& (Join-Path $script:MCP_DIR_OUT "fractalsql-ext-mcp.exe") --version 2>&1 | Out-String).Trim() + ")")
+  pass ("35 mcp: fractalsql-ext-mcp.exe built (" + (& (Join-Path $script:MCP_DIR_OUT "fractalsql-ext-mcp.exe") --version 2>&1 | plain_lines | Out-String).Trim() + ")")
   mcp_probe_run "35" "vectors_probe"
   mcp_probe_run "35" "sanitize_probe"
 }
@@ -3863,6 +3936,8 @@ function gate_37 {
   mcp_driver_gate "37" "https" "mcp_https_smoke_client.py" @{ MCP_HTTPS_PORT = "$port"; MCP_HTTPS_CERT = (Join-Path $w "cert.pem"); MCP_HTTPS_KEY = (Join-Path $w "key.pem") }
 }
 function gate_38 { mcp_driver_gate "38" "cli" "mcp_cli.py" }
+# SECURITY_AUDIT.md 3.17, 3.18: the HTTP transport refuses lookalike origins and repeated headers (no engine needed)
+function gate_58 { mcp_driver_gate "58" "audit_http" "mcp_audit_http.py" }
 function gate_39 { mcp_probe_run "39" "db_probe" }
 function gate_40 { mcp_probe_run "40" "concurrency_probe" }
 function gate_41 { skip "41 mcp_faults (needs LD_PRELOAD (tests/oom_preload.c) and signals; Linux only)" }
@@ -3892,7 +3967,7 @@ function gate_42 {
     $seed = Join-Path $w ("seed_" + $t); New-Item -ItemType Directory -Force -Path $seed | Out-Null
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $bin
-    foreach ($a in @($seed, (Join-Path $script:HERE ("tests\fuzz\corpus_mcp_" + $t)), ("-max_total_time=" + $secs), "-print_final_stats=1")) { $psi.ArgumentList.Add($a) }
+    foreach ($a in @($seed, (Join-Path $script:HERE ("tests\fuzz\corpus_mcp_" + $t)), ("-max_total_time=" + $secs), "-print_final_stats=1")) { add_proc_arg $psi $a }
     $psi.EnvironmentVariables["ASAN_OPTIONS"] = "detect_leaks=0:symbolize=0:alloc_dealloc_mismatch=0"
     $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false
     $p = [System.Diagnostics.Process]::Start($psi)
@@ -3926,6 +4001,29 @@ function find_clang_cl {
 }
 
 function gate_47 {
+  # The denied-call scan, case by case, in every spelling the SQL parser accepts (a comment or a quoted name before the
+  # parenthesis). A plain C program: clang-cl or cl.exe builds it, and it needs no libFuzzer.
+  $ccx = find_clang_cl
+  if (-not $ccx) { $c2 = Get-Command cl.exe -ErrorAction SilentlyContinue; if ($c2) { $ccx = $c2.Source } }
+  if ($ccx) {
+    $wd = Join-Path $script:PDIR "deniedcall"
+    New-Item -ItemType Directory -Force -Path $wd | Out-Null
+    $dbin = Join-Path $wd "denied_call_test.exe"
+    $dlog = Join-Path $wd "build.log"
+    & $ccx /std:c11 /O1 /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS -Isrc `
+          "tests\denied_call_test.c" "src\fsql_parse.c" "src\fsql_buf.c" ("/Fe" + $dbin) *> $dlog
+    if ($LASTEXITCODE -eq 0) {
+      $dout = & $dbin 2>&1 | plain_lines
+      if ($LASTEXITCODE -eq 0) {
+        pass "47 denied_call: the generated-SQL function denylist catches every spelling of a call"
+      } else {
+        fail "47 denied_call: a denied function got through"
+        $dout | ForEach-Object { Write-Host ("         " + $_) }
+      }
+    } else {
+      fail ("47 denied_call: the test failed to build; see " + $dlog)
+    }
+  }
   $cl = find_clang_cl
   if (-not $cl) { skip "47 fuzz_parse (no clang-cl on this machine; libFuzzer needs one)"; return }
   $w = Join-Path $script:PDIR "parsefuzz"
@@ -3957,7 +4055,7 @@ function gate_47 {
   foreach ($a in @((Join-Path $script:HERE "tests\fuzz\corpus_t2s_parse"), $seed,
                    ("-max_total_time=" + $secs), "-print_final_stats=1",
                    ("-artifact_prefix=" + $w + "\")))
-    { $psi.ArgumentList.Add($a) }
+    { add_proc_arg $psi $a }
   # The stock CLI's own shutdown allocations would be reported as leaks.
   $psi.EnvironmentVariables["ASAN_OPTIONS"] = "detect_leaks=0:symbolize=0:alloc_dealloc_mismatch=0"
   $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false
@@ -3982,7 +4080,7 @@ function gate_43 {
   $bad = 0
   foreach ($q in @("SELECT fractal_agent_recall_hybrid('x','y',[1.0]::DOUBLE[],'z')",
                    "SELECT fractal_agent_recall_hybrid('docs','emb',[1.0,0,0,0]::DOUBLE[],'body')")) {
-    $null = & $exe ":memory:" --ext $script:EXT -- $q 2>&1
+    $null = & $exe ":memory:" --ext $script:EXT -- $q 2>&1 | plain_lines
     if (crashed $LASTEXITCODE) { $bad++; Write-Host ("    crashed (rc=" + $LASTEXITCODE + "): " + $q) }
   }
   if ($bad -eq 0) { pass "43 recall_hybrid_filter: the filter-column-only call is refused with an error, not a crash" }
@@ -4071,7 +4169,7 @@ function gate_46 {
   $dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
   if ($dumpbin) {
     foreach ($f in @($bandS, $bandL)) {
-      $exp = & $dumpbin.Source /nologo /exports $f 2>&1 | Out-String
+      $exp = & $dumpbin.Source /nologo /exports $f 2>&1 | plain_lines | Out-String
       $names = @([regex]::Matches($exp, '(?m)^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)') | ForEach-Object { $_.Groups[1].Value })
       if ($names.Count -eq 1 -and $names[0] -eq "fractalsql_init_c_api") { & $ok "" }
       else { & $bad ((Split-Path -Leaf $f) + " exports " + $names.Count + " symbols (want only fractalsql_init_c_api): " + ($names -join " ")) }
@@ -4087,13 +4185,13 @@ function gate_46 {
   foreach ($row in @(@("14", "1.4.x", "refuse", "load"), @("15", "1.5.x", "load", "refuse"), @("20", "2.0.x", "load", "refuse"))) {
     $cli = capi_cli_for $row[0]
     if (-not $cli) { & $note ("no DuckDB " + $row[1] + " CLI (set FSQL_DUCKDB_" + $row[0] + ", or put it in $HOME\duckdb-cli\v<version>\)"); continue }
-    $ver = ((& $cli --version 2>&1 | Out-String).Trim() -split '\s+')[0]
+    $ver = ((& $cli --version 2>&1 | plain_lines | Out-String).Trim() -split '\s+')[0]
     foreach ($band in @(@("S", $bandS, $row[2]), @("L", $bandL, $row[3]))) {
       $want = $band[2]
       # the LTS band is the latest 1.4.x only: an older 1.4.x CLI must refuse it
       if ($band[0] -eq "L" -and $row[0] -eq "14" -and $ver -ne $lver) { $want = "refuse" }
       $sql = "LOAD '" + $band[1] + "'; " + $probe + ";"
-      $out = (& $cli -unsigned -csv -c $sql 2>&1 | Out-String)
+      $out = (& $cli -unsigned -csv -c $sql 2>&1 | plain_lines | Out-String)
       $rc = $LASTEXITCODE
       $head = $out.Trim(); if ($head.Length -gt 160) { $head = $head.Substring(0, 160) }
       if ($want -eq "load") {
@@ -4144,7 +4242,7 @@ function capi_py_run {
   $old = @{}
   foreach ($k in $vars.Keys) { $old[$k] = [Environment]::GetEnvironmentVariable($k, "Process"); [Environment]::SetEnvironmentVariable($k, $vars[$k], "Process") }
   try {
-    $out = (& $script:PYANY -I (Join-Path $script:HERE ("test\" + $script_name)) 2>&1 | Out-String -Width 8192)
+    $out = (& $script:PYANY -I (Join-Path $script:HERE ("test\" + $script_name)) 2>&1 | plain_lines | Out-String -Width 8192)
     $rc = $LASTEXITCODE
   } finally {
     foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $old[$k], "Process") }
@@ -4204,7 +4302,7 @@ function gate_55 {
   foreach ($r in $runs) {
     $old = @{}
     foreach ($k in $r.env.Keys) { $old[$k] = [Environment]::GetEnvironmentVariable($k, "Process"); [Environment]::SetEnvironmentVariable($k, $r.env[$k], "Process") }
-    try { $o = (& $exe $r.mode 2>&1 | Out-String); $rc = $LASTEXITCODE }
+    try { $o = (& $exe $r.mode 2>&1 | plain_lines | Out-String); $rc = $LASTEXITCODE }
     finally { foreach ($k in $r.env.Keys) { [Environment]::SetEnvironmentVariable($k, $old[$k], "Process") } }
     if ($rc -ne 0) { $bad++; ($o -split "`n" | Where-Object { $_ -match 'FAIL' } | Select-Object -First 3) | ForEach-Object { [Console]::Error.WriteLine("    " + $r.label + ": " + $_) } }
   }
@@ -4286,6 +4384,7 @@ function gate_name {
     "55" { return "ledger_integrity" }
     "56" { return "capi_oom" }
     "57" { return "capi_oom_full" }
+    "58" { return "mcp_audit_http" }
   }
   return ""
 }
@@ -4345,6 +4444,7 @@ function gate_body {
     "55" { gate_55 }
     "56" { gate_56 }
     "57" { gate_57 }
+    "58" { gate_58 }
   }
 }
 
@@ -4400,7 +4500,7 @@ function main {
   }
   if ($script:LIST_ONLY) {
     foreach ($g in @("01","02","03","04","05","06","07","08","09","10","11","12","13","14","15","16","17","18","19","20",
-                     "21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","53","54","55","56","57")) {
+                     "21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","53","54","55","56","57","58")) {
       Write-Output ("  " + $g + "  " + (gate_name $g))
     }
     return
@@ -4456,7 +4556,7 @@ function main {
   compile_plugins
 
   if ($script:MCP_ALIAS) {
-    $toRun = @("35","36","37","38","39","40","41")
+    $toRun = @("35","36","37","38","39","40","41","58")
   } elseif ($script:ONE_GATE) {
     $toRun = @($script:ONE_GATE)
   } elseif ($script:MODE -eq "quick") {
@@ -4465,7 +4565,7 @@ function main {
     $toRun = @("21", "42", "47")
   } else {
     $toRun = @("01","02","03","04","05","06","07","08","09","10","11","12","13","14","15","16","17","18","19","20",
-               "22","23","24","25","26","27","28","29","30","31","32","34","35","36","37","38","39","40","41","43","44","45","46","53","54","55","56")
+               "22","23","24","25","26","27","28","29","30","31","32","34","35","36","37","38","39","40","41","43","44","45","46","53","54","55","56","58")
   }
 
   # Every gate except 01 (locate) resolves the artifact itself, so a

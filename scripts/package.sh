@@ -41,7 +41,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="2.0.0"
+VERSION="2.0.1"
 DIST_DIR="dist/packages"
 mkdir -p "${DIST_DIR}"
 

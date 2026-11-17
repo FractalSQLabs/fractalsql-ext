@@ -104,11 +104,12 @@ What the server does with a request that arrives at the JSON-RPC path:
 | No token, or a token that matches nothing | `401` with `WWW-Authenticate: Bearer realm="fractalsql-mcp"` |
 | A token that was presented but refused, including an expired one | `401` with `WWW-Authenticate: Bearer realm="fractalsql-mcp", error="invalid_token"` |
 | A token in the query string instead of the `Authorization` header | `401` — the `Authorization` header is the only place a credential is read from, because a query string ends up in proxy logs and browser history |
-| A browser `Origin` header that this deployment does not allow | `403`, checked **before** the token, so an unapproved origin never reaches the credential check |
+| A browser `Origin` header that this deployment does not allow | `403`, checked **before** the token, so an unapproved origin never reaches the credential check; a loopback origin is `localhost`, `[::1]` or a literal address in `127.0.0.0/8` — a name that merely begins with `127.` is not one |
 | A chunked request body | `411` — send a `Content-Length` instead |
 | A declared `Content-Length` over 32 MB | `413` |
 | A repeated `Content-Length`, or one that is not a number | `400` — the framing is ambiguous and is never resolved in favour of one reading |
-| `GET /healthz` and `GET /readyz` | served without a token |
+| A repeated `Host`, `Authorization`, `Origin`, `Content-Type` or `Mcp-*` header | `400` — two values for a header the server acts on are never resolved in favour of one |
+| `GET /healthz` and `GET /readyz` | served without a token; `/readyz` runs its engine probe at most once every 5 seconds and answers the cached result in between |
 
 Repeated failed authentications are slowed down (the wait grows with the number of consecutive failures, capped at about two seconds), so guessing a token is not free. The comparison itself is constant-time, and no token is ever written to a log line.
 

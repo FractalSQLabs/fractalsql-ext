@@ -245,7 +245,7 @@ def main():
     check("fractalsql://schema names the fixture tables", "docs" in sch and "metrics" in sch, sch[:200])
     cfg = json.loads(s.call("resources/read", {"uri": "fractalsql://config"})["result"]["contents"][0]["text"])
     check("fractalsql://config reports the extension version, the lock-down and no enterprise tier, and holds no secret",
-          cfg.get("extension_version") == "2.0.0" and cfg.get("locked_down") is True and cfg.get("enterprise_tier") is False
+          cfg.get("extension_version") == "2.0.1" and cfg.get("locked_down") is True and cfg.get("enterprise_tier") is False
           and "http" not in json.dumps(cfg).lower(), cfg)
     check("an unknown resource is an error", "error" in s.call("resources/read", {"uri": "fractalsql://nope"}))
     check("a bad ledger kind is an error", "error" in s.call("resources/read", {"uri": "fractalsql://ledger/9"}))
@@ -267,7 +267,7 @@ def main():
         pass
     check("$/cancel: the server stays responsive", s.call("ping", {}, timeout=90).get("result") == {} and s.alive())
     e, sc = tool(s, "fractal_version", {})
-    check("a call after a cancel works", not e and sc.get("version") == "2.0.0" and sc.get("edition") == "Community", sc)
+    check("a call after a cancel works", not e and sc.get("version") == "2.0.1" and sc.get("edition") == "Community", sc)
     rc = s.close()
     check("the stdio server exits cleanly (rc 0) when its input ends", rc == 0, rc)
 

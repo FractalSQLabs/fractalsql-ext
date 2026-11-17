@@ -62,7 +62,7 @@
 /* ------------------------------------------------------------------ */
 
 /* Extension version. Single source of truth for fractal_version(). */
-#define FSQL_DUCKDB_VERSION_STR   "2.0.0"
+#define FSQL_DUCKDB_VERSION_STR   "2.0.1"
 #define FSQL_DUCKDB_EDITION_STR   "Community"
 
 /* SFS tuning defaults for fractal_search. */
