@@ -81,7 +81,7 @@ jobs:
 
       - name: Attest build provenance
         if: steps.have_assets.outputs.count != '0'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             dist/*.tar.gz
