@@ -198,7 +198,7 @@ jobs:
           echo "ok: fractal_reason round-trip through mock LLM"
 
       - name: Upload built extensions for downstream smoke jobs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: extensions-amd64
           path: |
