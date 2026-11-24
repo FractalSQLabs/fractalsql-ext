@@ -11,7 +11,7 @@
  *
  *   fractalsql_ext.c   entry point (fractalsql_init_c_api), load guard,
  *                         registration table, smoke + search/scout surface
- *                         (fractal_edition/_version, fractal_search,
+ *                         (fractal_edition/_version, fractal_sfs_converge,
  *                         fractal_search_explore)
  *   fsql_duck.c/.h        the adapter: the ONLY code that touches
  *                         duckdb_extension.h (registration, vectors, errors,
@@ -19,6 +19,8 @@
  *                         classifier, per-connection registry)
  *   fsql_buf.c/.h         bounds-checked string builder and arrays
  *   fsql_vector.c/.h      fractal_vector_* (distance, math, quantize, text)
+ *   fsql_precision.h      the ONE shared double-precision maths (dot / L2 / norm / cosine)
+ *   fsql_index.c          fractal_index_* (the native IVF index) and the indexed fractal_sfs_converge
  *   fsql_config.c         fractal_config_set / fractal_config_get
  *   fsql_reasoning.c      the four-tier reasoning machinery (env blocks, plugin
  *                         load + verify, dispatch) and fractal_reason
@@ -62,10 +64,10 @@
 /* ------------------------------------------------------------------ */
 
 /* Extension version. Single source of truth for fractal_version(). */
-#define FSQL_DUCKDB_VERSION_STR   "2.0.1"
+#define FSQL_DUCKDB_VERSION_STR   "2.0.2"
 #define FSQL_DUCKDB_EDITION_STR   "Community"
 
-/* SFS tuning defaults for fractal_search. */
+/* SFS tuning defaults for fractal_sfs_converge. */
 #define FSQL_SFS_DEFAULT_ITERATIONS 30
 #define FSQL_SFS_DEFAULT_POP_SIZE   50
 #define FSQL_SFS_DEFAULT_DIFFUSION  2
@@ -164,6 +166,7 @@ typedef struct FsqlEnterpriseApi {
     int (*ledger_shadow_count)(const fsql_ctx *, size_t *);
     int (*audit_unpack)(const void *, size_t, char *, size_t *);
     /* optional (tolerant-absence) symbols */
+    int (*ledger_set_retention)(fsql_ctx *, int);   /* absent in a core older than the retention modes */
     int (*optimize_portfolio_multimodal)(const double *, const double *, size_t, size_t,
                                          int, double, double, uint64_t, double *, double *, int *);
     int (*optimize_portfolio_multimodal_ex)(const double *, const double *, size_t, size_t,
@@ -199,7 +202,12 @@ typedef struct FsqlConn {
     int                 diversify_enabled;   /* mirrored here: the core has no getter           */
     int                 destructive_locked;  /* set by fractal_lock_destructive(); never cleared */
     int                 da_diversify;        /* the domain agents' own diversify flag (engines F, I)    */
+    int                 retention_applied;   /* the ledger retention mode given to the core: 0 fade (its default), 1 exact */
 } FsqlConn;
+
+/* Gives the configured ledger retention (FRACTALSQL_LEDGER_RETENTION, key ledger_retention) to the connection's core
+ * context when it changed. 0 ok; -1 with `err` filled (exact asked of a library that cannot honour it). */
+int fsql_conn_sync_retention(FsqlConn *c, char *err, size_t err_cap);
 
 /* How a result chunk's vector column is laid out (LIST or ARRAY of DOUBLE/FLOAT), and the reader for one
  * of its rows: appends the row to `out` and returns 1; 0 = NULL vector (or NULL element); -1 = malformed.
@@ -210,6 +218,7 @@ int fsql_read_vec_row(duckdb_vector v, const fsql_vkind *k, idx_t row, fsql_vecd
 
 /* The state for the calling connection. NULL only on out-of-memory. */
 FsqlConn *fsql_conn_get(fsql_instance *inst, idx_t conn_id);
+idx_t fsql_bind_conn_id(duckdb_bind_info info);   /* the connection id of a table function's bind (fsql_duck.c) */
 
 /* Fails the call with "fractalsql: <fn>: <what>" -- the wording of the C++ build's RunLedgerAction. */
 void fsql_ledger_fail(duckdb_function_info info, const char *fn_name, const char *fmt, ...) FSQL_PRINTF(3, 4);
@@ -219,10 +228,12 @@ void fsql_ledger_fail(duckdb_function_info info, const char *fn_name, const char
 bool fsql_search_register(duckdb_connection con, const char **err);       /* fractalsql_ext.c */
 /* The rest are added as each TU is ported: */
 bool fsql_vector_register(duckdb_connection con, const char **err);          /* fsql_vector.c         */
+bool fsql_index_register(duckdb_connection con, const char **err);           /* fsql_index.c          */
 bool fsql_config_register(duckdb_connection con, const char **err);          /* fsql_config.c         */
 /* bool fsql_reasoning_register(duckdb_connection con, const char **err);       fsql_reasoning.c      */
 bool fsql_t2s_register(duckdb_connection con, const char **err);             /* fsql_t2s.c            */
 bool fsql_vectorizer_register(duckdb_connection con, const char **err);        /* fsql_vectorizer.c     */
+bool fsql_feature_store_register(duckdb_connection con, const char **err);     /* fsql_feature_store.c  */
 bool fsql_agents_register(duckdb_connection con, const char **err);          /* fsql_agents.c         */
 bool fsql_domain_agents_register(duckdb_connection con, const char **err);     /* fsql_domain_agents.c  */
 bool fsql_ledger_register(duckdb_connection con, const char **err);          /* fsql_ledger.c         */

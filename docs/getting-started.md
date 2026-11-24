@@ -40,7 +40,7 @@ SELECT fractal_edition(), fractal_version();
 ```
   fractal_edition() | fractal_version()
 ------------------------+------------------------
-       Community        |         2.0.1
+       Community        |         2.0.2
 ```
 
 No `CREATE EXTENSION`, no server restart, no config file -- `LOAD` registers
@@ -53,7 +53,7 @@ every function in the current session immediately.
 FractalSQL's core is a **Stochastic Fractal Search** optimizer, in two
 flavours that solve different problems:
 
-- **Sniper** (`fractal_search`): per-row cosine distance to an SFS-refined
+- **Sniper** (`fractal_sfs_converge`): per-row cosine distance to an SFS-refined
   point -- the ORDER BY/LIMIT nearest-neighbor pattern.
 - **Scout**: discover the *diverse* structure of your own data, finding
   distinct "islands" instead of collapsing to one neighbourhood -- two
@@ -61,6 +61,11 @@ flavours that solve different problems:
   table you `SELECT` from, and the
   `fractal_search_explore('table', 'emb_col', query, options)` **table
   function** that scans a named table/column directly.
+
+A third entry point, the indexed `fractal_search(table, column, query, k, options)`,
+returns the nearest rows of a stored table through a native IVF index
+(`fractal_index_create`), and still returns exact distances -- the index only
+chooses which rows to look at. See [Discovery](api-discovery.md).
 
 Scout is what makes FractalSQL different from a plain vector search. Try it
 on a tiny toy corpus:
@@ -73,7 +78,7 @@ INSERT INTO demo_vecs VALUES
   (3, [0.2, 0.8, 0.2]);
 
 -- Sniper: nearest neighbor by cosine distance to a refined query point.
-SELECT id, fractal_search(emb, [0.5, 0.5, 0.5]::DOUBLE[]) AS dist
+SELECT id, fractal_sfs_converge(emb, [0.5, 0.5, 0.5]::DOUBLE[]) AS dist
 FROM demo_vecs
 ORDER BY dist
 LIMIT 3;

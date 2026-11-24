@@ -10,8 +10,8 @@ preferred; falls back to a reduced CLI-driven mode when only a `duckdb`
 CLI is available, since some of the STRUCT-returning probes are easier to
 parse in-process) and asserts:
 
-  * edition/version pins (2.0.1 / Community),
-  * fractal_search self-distance < 1e-6,
+  * edition/version pins (2.0.2 / Community),
+  * fractal_sfs_converge self-distance < 1e-6,
   * the B1-B7 analytic function contracts from the port plan
     (change-point, periodogram, TDA, state fingerprint, cycle detect,
     optimize subset, vector quartet) with their exact error substrings,
@@ -30,7 +30,7 @@ import os
 import glob
 import sys
 
-EXPECTED_VERSION = "2.0.1"
+EXPECTED_VERSION = "2.0.2"
 EXPECTED_EDITION = "Community"
 
 
@@ -81,7 +81,7 @@ def check_version_edition(conn):
 
 
 def check_search_self_distance(conn):
-    d = scalar(conn, "SELECT fractal_search("
+    d = scalar(conn, "SELECT fractal_sfs_converge("
                      "[0.6, 0.8, 0.0]::DOUBLE[], [0.6, 0.8, 0.0]::DOUBLE[])")
     assert d is not None and abs(d) < 1e-6, "self-distance %r >= 1e-6" % (d,)
     print("ok: self-distance %.2e < 1e-6" % abs(d))
@@ -499,7 +499,7 @@ def cli_mode(ext):
     sql = ("LOAD '%s';" % os.path.abspath(ext),
            "SELECT fractal_edition();",
            "SELECT fractal_version();",
-           "SELECT fractal_search([0.6, 0.8, 0.0]::DOUBLE[], "
+           "SELECT fractal_sfs_converge([0.6, 0.8, 0.0]::DOUBLE[], "
            "[0.6, 0.8, 0.0]::DOUBLE[]);")
     out = subprocess.run(
         [cli, "-bail", "-unsigned", "-c", "; ".join(sql)],

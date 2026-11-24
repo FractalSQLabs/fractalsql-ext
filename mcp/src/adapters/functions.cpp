@@ -31,6 +31,11 @@ namespace
     struct SpecTool
     {
         std::string name, category, kind, cls, out, ret, desc;
+        // The SQL function this tool calls. It is the tool's own name unless the
+        // engine spells the operation differently -- a tool that publishes the
+        // canonical name of an operation the engine calls something else says
+        // so here, and the SQL follows the engine.
+        std::string sql;
         bool        readOnly = true, destructive = false, openWorld = false;
         bool        secret = false;   // args/result may carry content a client should not echo or log casually
         std::vector<SpecParam> params;
@@ -53,6 +58,7 @@ namespace
                 s.out = t.at( "out" ); s.ret = t.value( "ret", std::string() ); s.desc = t.at( "desc" );
                 s.readOnly = t.at( "readOnly" ); s.destructive = t.at( "destructive" ); s.openWorld = t.at( "openWorld" );
                 s.secret = t.value( "secret", false );
+                s.sql = t.value( "sql", s.name );
                 for( const Json& p : t.at( "params" ) )
                 {
                     SpecParam q;
@@ -225,7 +231,7 @@ namespace
         if( v.is_object() ) return v;
         if( v.is_array() )
         {
-            const bool vec = t.name.rfind( "fractal_vector_", 0 ) == 0 || t.name == "fractal_embed" || t.name == "fractal_search";
+            const bool vec = t.name.rfind( "fractal_vector_", 0 ) == 0 || t.name == "fractal_embed" || t.name == "fractal_sfs_converge";
             if( vec ) return Json{ { "vector", v }, { "dim", v.size() } };
             return Json{ { "items", v } };
         }
@@ -353,7 +359,7 @@ namespace
             if( !p.named && p.required && !provided.count( p.name ) ) throw ToolError( ErrorClass::Schema, "missing required argument: " + p.name );
 
         std::size_t cap = 0;
-        const std::string call = t.name + "(" + argSql + ")";
+        const std::string call = t.sql + "(" + argSql + ")";
         std::string sql;
         if( t.rows() )
         {

@@ -254,7 +254,7 @@ static void put_id_value_json(fsql_sb *b, const char *s) {
     if (*s && json_number_ok(s)) fsql_sb_puts(b, s); else put_json_string(b, s);
 }
 static void put_id_or_null_json(fsql_sb *b, const char *s) {
-    if (!*s) fsql_sb_puts(b, "null"); else put_id_value_json(b, s);
+    if (!s) fsql_sb_puts(b, "null"); else put_id_value_json(b, s);
 }
 /* Text that already looks like JSON is emitted raw; anything else as a string. */
 static void put_raw_or_string(fsql_sb *b, const char *s) {
@@ -299,13 +299,15 @@ static int da_table_has_rows(da *d, const char *table) {
     return q_rows(q) > 0 ? 1 : 0;
 }
 
-/* The id column's text for a row located by rowid / scan position. "" when not found. */
+/* The id column's text for a row located by rowid / scan position. "" when not found, NULL when the
+ * column itself is NULL: an id that is the empty string and an id that is missing are different. */
 static char *da_resolve_rowid(da *d, const char *table, const char *id_col, int64_t rowid) {
     fsql_sb *s = da_sb(d);
     fsql_sb_puts(s, "SELECT "); put_ident(s, id_col); fsql_sb_puts(s, " FROM "); put_ident(s, table);
     fsql_sb_printf(s, " WHERE rowid = %" PRId64, rowid);
     fsql_qres *q = da_query(d, da_sb_str(d, s));
-    return q_rows(q) > 0 ? q_text(d, q, 0, 0) : da_dup(d, "");
+    if (q_rows(q) == 0) return da_dup(d, "");
+    return q_null(q, 0, 0) ? NULL : q_text(d, q, 0, 0);
 }
 static char *da_resolve_scan_pos(da *d, const char *table, const char *id_col, int64_t pos) {
     fsql_sb *s = da_sb(d);
@@ -313,7 +315,8 @@ static char *da_resolve_scan_pos(da *d, const char *table, const char *id_col, i
     fsql_sb_puts(s, ", row_number() OVER (ORDER BY rowid) - 1 AS __fsql_doc_id FROM "); put_ident(s, table);
     fsql_sb_printf(s, ") WHERE __fsql_doc_id = %" PRId64, pos);
     fsql_qres *q = da_query(d, da_sb_str(d, s));
-    return q_rows(q) > 0 ? q_text(d, q, 0, 0) : da_dup(d, "");
+    if (q_rows(q) == 0) return da_dup(d, "");
+    return q_null(q, 0, 0) ? NULL : q_text(d, q, 0, 0);
 }
 static char *da_resolve_locator(da *d, const char *table, const char *id_col, int64_t locator, bool used_rowid) {
     return used_rowid ? da_resolve_rowid(d, table, id_col, locator) : da_resolve_scan_pos(d, table, id_col, locator);
@@ -588,6 +591,101 @@ static void da_hybrid_search(da *d, const char *who, const char *table, const ch
     da_vec_ok(d, out->distances);
 }
 
+/* agent_use_index (the config key of that name, off by default): the nearest-row agents (route_task, outlier_intercept,
+ * schedule_workload) search through a fractal_index when one covers the table and column. An index is approximate in WHICH rows it
+ * examines (every distance is still exact), so an agent that searched through it could, rarely, pick a different nearest row than
+ * the exact scan. Fills `out` (the matched row's rowid and its exact distance) and returns true when the search went through the
+ * index; false (and `out` untouched) leaves the caller on the exact scan: the key off, no index, or an index that cannot answer. */
+/* 0 = off, 1 = on, 2 = auto (an index only when it is ready and the table has at least agent_index_min_rows rows) */
+static int da_use_index_mode(void) {
+    const char *e = getenv("FRACTALSQL_AGENT_USE_INDEX");
+    if (!e || !*e) return 0;
+    if (strcmp(e, "auto") == 0) return 2;
+    return (strcmp(e, "1") == 0 || strcmp(e, "on") == 0 || strcmp(e, "true") == 0 || strcmp(e, "yes") == 0 ||
+            strcmp(e, "ON") == 0 || strcmp(e, "TRUE") == 0 || strcmp(e, "YES") == 0) ? 1 : 0;
+}
+
+/* The k nearest rows through the index. `cohort` (rowids, or NULL / empty for the whole table) restricts the search to those rows by
+ * passing their index ids as the search's ids set: exact for a short cohort, the index plus a filter for a long one. The hits carry
+ * rowids (the agents locate a row by its rowid) and exact distances, nearest first. */
+static bool da_index_hit_k(da *d, const char *table, const char *col, const double *query, size_t qn, int k, const da_i64v *cohort, da_hybrid *out) {
+    int mode = da_use_index_mode();
+    if (mode == 0 || qn == 0 || k < 1) return false;
+    char err[DA_ERRCAP];
+    fsql_sb *s = da_sb(d);
+    fsql_sb_puts(s, "SELECT id_col, name FROM fractal_index_meta WHERE tbl = "); put_lit(s, table);
+    fsql_sb_puts(s, " AND col = "); put_lit(s, col); fsql_sb_puts(s, " ORDER BY name LIMIT 1");
+    fsql_qres *m = da_try_query(d, da_sb_str(d, s), err, sizeof err);      /* the catalog does not exist until the first index is built */
+    if (!m || q_rows(m) == 0 || q_null(m, 0, 0)) return false;
+    const char *id_col = q_text(d, m, 0, 0);
+    if (mode == 2) {
+        /* auto: only a ready index (nothing stale beyond a refresh) on a table of at least agent_index_min_rows rows */
+        const char *name = q_text(d, m, 1, 0);
+        long long min_rows = 10000;
+        const char *mr = getenv("FRACTALSQL_AGENT_INDEX_MIN_ROWS");
+        if (mr && *mr) min_rows = atoll(mr);
+        fsql_sb *si = da_sb(d);
+        fsql_sb_puts(si, "SELECT json_extract_string(i, '$.status'), json_extract(i, '$.rows_now')::BIGINT FROM (SELECT fractal_index_info(");
+        put_lit(si, name); fsql_sb_puts(si, ") AS i)");
+        fsql_qres *ri = da_try_query(d, da_sb_str(d, si), err, sizeof err);
+        if (!ri || q_rows(ri) == 0 || q_null(ri, 0, 0) || strcmp(q_text(d, ri, 0, 0), "ready") != 0 || q_null(ri, 1, 0) || q_i64(ri, 1, 0) < min_rows)
+            return false;
+    }
+
+    /* a cohort of rowids becomes the index ids of those rows */
+    char *ids_json = NULL;
+    if (cohort && cohort->n > 0) {
+        fsql_sb *sc = da_sb(d);
+        fsql_sb_puts(sc, "SELECT CAST(list("); put_ident(sc, id_col); fsql_sb_puts(sc, ") AS VARCHAR) FROM "); put_ident(sc, table);
+        fsql_sb_puts(sc, " WHERE rowid IN (");
+        for (size_t i = 0; i < cohort->n; i++) fsql_sb_printf(sc, "%s%" PRId64, i ? "," : "", cohort->p[i]);
+        fsql_sb_putc(sc, ')');
+        fsql_qres *rc = da_try_query(d, da_sb_str(d, sc), err, sizeof err);
+        if (!rc || q_rows(rc) == 0 || q_null(rc, 0, 0)) return false;
+        ids_json = q_text(d, rc, 0, 0);
+    }
+
+    fsql_sb *sq = da_sb(d);                                     /* fractal_search is a table function: constant arguments */
+    fsql_sb_puts(sq, "SELECT doc_id, distance FROM fractal_search("); put_lit(sq, table); fsql_sb_puts(sq, ","); put_lit(sq, col);
+    fsql_sb_puts(sq, ",[");
+    for (size_t i = 0; i < qn; i++) fsql_sb_printf(sq, "%s%.17g", i ? "," : "", query[i]);
+    fsql_sb_printf(sq, "]::DOUBLE[], %d, ", k);
+    if (ids_json) { fsql_sb *oj = da_sb(d); fsql_sb_puts(oj, "{\"ids\":"); fsql_sb_puts(oj, ids_json); fsql_sb_putc(oj, '}'); put_lit(sq, da_sb_str(d, oj)); }
+    else fsql_sb_puts(sq, "'{}'");
+    fsql_sb_puts(sq, ") ORDER BY distance");
+    fsql_qres *r = da_try_query(d, da_sb_str(d, sq), err, sizeof err);
+    if (!r || q_rows(r) == 0) return false;
+    idx_t nh = q_rows(r);
+
+    fsql_sb *rs = da_sb(d);                                     /* the agents locate a row by its rowid */
+    fsql_sb_puts(rs, "SELECT rowid, "); put_ident(rs, id_col); fsql_sb_puts(rs, " FROM "); put_ident(rs, table);
+    fsql_sb_puts(rs, " WHERE "); put_ident(rs, id_col); fsql_sb_puts(rs, " IN (");
+    for (idx_t i = 0; i < nh; i++) { if (q_null(r, 0, i)) return false; fsql_sb_printf(rs, "%s%lld", i ? "," : "", (long long)q_i64(r, 0, i)); }
+    fsql_sb_putc(rs, ')');
+    fsql_qres *rr = da_try_query(d, da_sb_str(d, rs), err, sizeof err);
+    if (!rr) return false;
+    idx_t nr = q_rows(rr);
+    out->used_rowid = true;
+    out->locators = da_i64vec(d);
+    out->distances = da_vecd(d);
+    for (idx_t i = 0; i < nh; i++) {
+        if (q_null(r, 1, i)) continue;
+        long long doc_id = (long long)q_i64(r, 0, i);
+        for (idx_t j = 0; j < nr; j++) {
+            if (q_null(rr, 0, j) || q_null(rr, 1, j) || (long long)q_i64(rr, 1, j) != doc_id) continue;
+            i64v_push(d, out->locators, q_i64(rr, 0, j));
+            fsql_vecd_push(out->distances, q_f64(r, 1, i));
+            break;
+        }
+    }
+    da_vec_ok(d, out->distances);
+    return out->locators->n > 0;
+}
+
+static bool da_index_hit(da *d, const char *table, const char *col, const double *query, size_t qn, da_hybrid *out) {
+    return da_index_hit_k(d, table, col, query, qn, 1, NULL, out);
+}
+
 typedef struct { size_t hit_index; char *id_text; bool has_id; bool has_content; char *content_text; } da_joined;
 typedef struct { da_joined *p; size_t n; } da_joined_list;
 
@@ -643,14 +741,39 @@ static void da_audit(da *d, const char *entry_type, const char *payload_json) {
 
 static void da_no_row(da *d) { da_fail(d, "fractalsql: primitive call returned NULL"); }
 
+/* agent_partial_reasoning_fail (config key, off by default): when the reasoning step fails AFTER the data step has computed, the agent keeps
+ * its computed half and reports the failure ("reasoning_step_failed") instead of raising. Read from the environment variable the key sets. */
+static bool agent_partial_reasoning_on(void) {
+    const char *e = getenv("FRACTALSQL_AGENT_PARTIAL_REASONING_FAIL");
+    return e && (!strcmp(e, "1") || !strcmp(e, "on") || !strcmp(e, "true") || !strcmp(e, "yes"));
+}
+
 /* A CHAT-tier cognition step. true = a rationale (frame-owned) in *out; false = an outage, text in *err_out.
  * A plugin that was never configured fails the engine. */
 static bool da_try_reasoning(da *d, int tier, const char *prompt, const char *ctx, char **out, char **err_out) {
     char *resp = NULL;
     char err[DA_ERRCAP];
+    /* The reasoning plugin tells the model to answer ONLY from the context JSON it is handed, and an agent states its computed
+     * findings in the prompt, so with a bare or identifier-only context the model sometimes answers "I don't have any data".
+     * Hand the findings over as data too: {"findings": <prompt>, "context": <the caller's context>} (the context is omitted
+     * when it is empty or {}). */
+    fsql_sb *w = da_sb(d);
+    fsql_sb_puts(w, "{\"findings\":");
+    put_json_string(w, prompt);
+    {
+        const char *c = ctx;
+        while (*c == ' ' || *c == '\t' || *c == '\n' || *c == '\r') c++;
+        if (*c && strcmp(c, "{}") != 0) {
+            fsql_sb_puts(w, ",\"context\":");
+            put_raw_or_string(w, ctx);
+        }
+    }
+    fsql_sb_putc(w, '}');
+    ctx = da_sb_str(d, w);
     int rc = fsql_reasoning_generate(tier, prompt, strlen(prompt), ctx, strlen(ctx), &resp, err, sizeof err);
     if (rc == FSQL_REASONING_OK) { *out = da_dup(d, resp); free(resp); *err_out = NULL; return true; }
     if (rc == FSQL_REASONING_NOT_CONFIGURED) da_fail(d, "%s", err);
+    if (!agent_partial_reasoning_on()) da_fail(d, "fractalsql: the reasoning step failed: %s", err);
     *out = NULL;
     *err_out = da_dup(d, err);
     return false;
@@ -839,19 +962,20 @@ static void body_route_task(da *d, const da_args *a, fsql_sb *out) {
     if (!da_table_has_rows(d, cap_table)) da_fail(d, "%s: no capability rows in %s", who, cap_table);
     da_hybrid hit;
     da_i64v *cohort = da_i64vec(d);
-    da_hybrid_search(d, who, cap_table, cap_emb, task->p, task->len, 1, cohort, &hit, false);
+    if (!da_index_hit(d, cap_table, cap_emb, task->p, task->len, &hit))
+        da_hybrid_search(d, who, cap_table, cap_emb, task->p, task->len, 1, cohort, &hit, false);
     if (hit.locators->n == 0) da_fail(d, "%s: no capability rows in %s", who, cap_table);
     double dist = hit.distances->p[0];
     const char *routed = da_resolve_locator(d, cap_table, cap_id, hit.locators->p[0], hit.used_rowid);
     const char *prompt = da_fmt(d, "Route this task to capability %s (cosine distance %s). Justify the routing in one sentence.",
-                                *routed ? routed : "?", da_f10(d, dist));
+                                (routed && *routed) ? routed : "?", da_f10(d, dist));
     const char *cj = da_fmt(d, "{\"budget\":%d,\"cost_per_route\":%d}", budget, cost);
     char *rationale, *rerr;
     bool ok = da_try_reasoning(d, FSQL_REASONING_TIER_CHAT, prompt, cj, &rationale, &rerr);
     double confidence = 1.0 / (1.0 + dist);
     fsql_sb *audit = da_sb(d);
     fsql_sb_puts(audit, "{\"routed_to\":");
-    if (!*routed) fsql_sb_puts(audit, "null"); else put_json_string(audit, routed);   /* always a string */
+    if (!routed) fsql_sb_puts(audit, "null"); else put_json_string(audit, routed);   /* always a string */
     fsql_sb_printf(audit, ",\"confidence\":%s,\"remaining_budget\":%lld,\"rationale\":", da_f10(d, confidence), (long long)budget - (long long)cost);   /* 64-bit: two caller ints can overflow an int */
     da_rationale_value(audit, ok, rationale, rerr);
     fsql_sb_putc(audit, '}');
@@ -896,7 +1020,8 @@ static void body_outlier_intercept(da *d, const da_args *a, fsql_sb *out) {
     } else {
         da_i64v *cohort = da_i64vec(d);
         da_hybrid hit;
-        da_hybrid_search(d, who, table, emb, state->p, state->len, 1, cohort, &hit, false);
+        if (!da_index_hit(d, table, emb, state->p, state->len, &hit))
+            da_hybrid_search(d, who, table, emb, state->p, state->len, 1, cohort, &hit, false);
         if (hit.locators->n == 0) da_fail(d, "%s: no bad-state rows in %s", who, table);
         dist = hit.distances->p[0];
     }
@@ -953,7 +1078,9 @@ static void body_recall_hybrid(da *d, const da_args *a, fsql_sb *out) {
         if (cohort->n == 0) da_fail(d, "%s: filter matched no rows in %s", who, mem_table);
     }
     da_hybrid hits;
-    da_hybrid_search(d, who, mem_table, vec_col, query->p, query->len, k, cohort, &hits, true);
+    /* agent_use_index: the nearest rows through the index (the cohort becomes its ids set) when one covers the column */
+    if (!da_index_hit_k(d, mem_table, vec_col, query->p, query->len, k, cohort, &hits))
+        da_hybrid_search(d, who, mem_table, vec_col, query->p, query->len, k, cohort, &hits, true);
     da_joined_list jl = da_join_hits(d, mem_table, id_col, content_col, &hits);
     fsql_sb_putc(out, '[');
     for (size_t i = 0; i < jl.n; i++) {
@@ -1140,7 +1267,7 @@ static void body_patient_triage(da *d, const da_args *a, fsql_sb *out) {
         const char *id_text = da_resolve_locator(d, table, id_col, hits.locators->p[h], hits.used_rowid);
         if (strlen(da_sb_str(d, matches)) > 1) fsql_sb_putc(matches, ',');
         fsql_sb_puts(matches, "{\"id\":");
-        if (*id_text) put_id_value_json(matches, id_text); else fsql_sb_puts(matches, "null");
+        if (id_text) put_id_value_json(matches, id_text); else fsql_sb_puts(matches, "null");
         fsql_sb_puts(matches, ",\"distance\":");
         put_number_json(matches, hits.distances->p[h]);
         fsql_sb_putc(matches, '}');
@@ -1151,7 +1278,7 @@ static void body_patient_triage(da *d, const da_args *a, fsql_sb *out) {
     da_traj_hit traj;
     da_trajectory_nearest(d, who, table, vec_col, baseline, current, &traj);
     const char *prompt = da_fmt(d, "Triage this patient: nearest cohort match is id %s at cosine distance %s; baseline->current drift distance is %s. Justify the deterioration triage in one sentence.",
-                                *first_id ? first_id : "?", da_f10(d, cohort_dist), da_f10(d, traj.dist));
+                                (first_id && *first_id) ? first_id : "?", da_f10(d, cohort_dist), da_f10(d, traj.dist));
     const char *cj = da_fmt(d, "{\"cohort_distance\":%s,\"drift_distance\":%s}", da_f10(d, cohort_dist), da_f10(d, traj.dist));
     char *rationale, *rerr;
     bool ok = da_try_reasoning(d, FSQL_REASONING_TIER_CHAT, prompt, cj, &rationale, &rerr);
@@ -1272,18 +1399,19 @@ static void body_schedule_workload(da *d, const da_args *a, fsql_sb *out) {
     da_refine_best_point(d, task->p, task->len, iterations, population, refined);
     da_hybrid hit;
     da_i64v *cohort = da_i64vec(d);
-    da_hybrid_search(d, who, table, emb, refined->p, refined->len, 1, cohort, &hit, false);
+    if (!da_index_hit(d, table, emb, refined->p, refined->len, &hit))
+        da_hybrid_search(d, who, table, emb, refined->p, refined->len, 1, cohort, &hit, false);
     if (hit.locators->n == 0) da_fail(d, "%s: no node rows in %s", who, table);
     double dist = hit.distances->p[0];
     const char *assigned = da_resolve_locator(d, table, id_col, hit.locators->p[0], hit.used_rowid);
-    const char *prompt = da_fmt(d, "Schedule this workload onto node %s (cosine distance %s after fractal_search refinement). Justify the placement in one sentence.",
-                                *assigned ? assigned : "?", da_f10(d, dist));
+    const char *prompt = da_fmt(d, "Schedule this workload onto node %s (cosine distance %s after fractal_sfs_converge refinement). Justify the placement in one sentence.",
+                                (assigned && *assigned) ? assigned : "?", da_f10(d, dist));
     char *rationale, *rerr;
     bool ok = da_try_reasoning(d, FSQL_REASONING_TIER_CHAT, prompt, context_json, &rationale, &rerr);
     double confidence = 1.0 / (1.0 + dist);
     fsql_sb *audit = da_sb(d);
     fsql_sb_puts(audit, "{\"assigned_node\":");
-    if (!*assigned) fsql_sb_puts(audit, "null"); else put_json_string(audit, assigned);
+    if (!assigned) fsql_sb_puts(audit, "null"); else put_json_string(audit, assigned);
     fsql_sb_printf(audit, ",\"confidence\":%s,\"rationale\":", da_f10(d, confidence));
     da_rationale_value(audit, ok, rationale, rerr);
     fsql_sb_putc(audit, '}');
@@ -1313,7 +1441,7 @@ static void body_rebalance_sibling(da *d, const da_args *a, fsql_sb *out) {
     if (!traj.found) da_fail(d, "%s: no allocation rows in %s", who, table);
     const char *rid = da_resolve_scan_pos(d, table, id_col, traj.doc);
     const char *prompt = da_fmt(d, "Rebalance triage: the optimized portfolio has Sharpe %s and is nearest to historical allocation id %s (cosine distance %s). Justify the rebalance in one sentence.",
-                                da_f10(d, opt.sharpe), *rid ? rid : "?", da_f10(d, traj.dist));
+                                da_f10(d, opt.sharpe), (rid && *rid) ? rid : "?", da_f10(d, traj.dist));
     char *rationale, *rerr;
     bool ok = da_try_reasoning(d, FSQL_REASONING_TIER_CHAT, prompt, context_json, &rationale, &rerr);
     fsql_sb *audit = da_sb(d);
@@ -1352,7 +1480,7 @@ static void body_detour_classify(da *d, const da_args *a, fsql_sb *out) {
     double bc = da_boxcount_of(d, gps->p, gps->len, boxcount_dim);
     const char *rid = da_resolve_scan_pos(d, table, id_col, traj.doc);
     const char *prompt = da_fmt(d, "Detour classify: vehicle %s deviates from its baseline by cosine distance %s (nearest fleet peer); its GPS trace has box-counting dimension %s. Classify the detour in one sentence.",
-                                *rid ? rid : "?", da_f10(d, traj.dist), da_f10(d, bc));
+                                (rid && *rid) ? rid : "?", da_f10(d, traj.dist), da_f10(d, bc));
     const char *cj = da_fmt(d, "{\"trajectory_distance\":%s,\"trace_complexity\":%s}", da_f10(d, traj.dist), da_f10(d, bc));
     char *rationale, *rerr;
     bool ok = da_try_reasoning(d, FSQL_REASONING_TIER_CHAT, prompt, cj, &rationale, &rerr);
@@ -1384,7 +1512,7 @@ static void body_track_anomaly(da *d, const da_args *a, fsql_sb *out) {
     double dfa = da_dfa_of(d, heading->p, heading->len);
     const char *rid = da_resolve_scan_pos(d, table, id_col, traj.doc);
     const char *prompt = da_fmt(d, "Track anomaly: vessel/host %s deviates from baseline by cosine distance %s; its heading-change series has DFA exponent %s (dfa=-1 means insufficient window). Triage the track in one sentence.",
-                                *rid ? rid : "?", da_f10(d, traj.dist), da_f10(d, dfa));
+                                (rid && *rid) ? rid : "?", da_f10(d, traj.dist), da_f10(d, dfa));
     const char *cj = da_fmt(d, "{\"trajectory_distance\":%s,\"dfa_exponent\":%s}", da_f10(d, traj.dist), da_f10(d, dfa));
     char *rationale, *rerr;
     bool ok = da_try_reasoning(d, FSQL_REASONING_TIER_CHAT, prompt, cj, &rationale, &rerr);

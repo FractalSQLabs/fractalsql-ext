@@ -43,7 +43,7 @@ here is the pick-list.
 | `fractal_agent_trajectory_predict` | Forecast state by matching a drift delta-vector in history | You need "where is this heading, based on past drift?" |
 | `fractal_agent_detect_loop` | SimHash + Brent cycle detector over a state-vector log | You need a safety monitor on an autonomous agent's state log |
 
-Underneath these, the **Discovery primitives** (`fractal_search`,
+Underneath these, the **Discovery primitives** (`fractal_sfs_converge`,
 `fractal_search_explore`, `fractal_search_trajectory`, `fractal_search_telemetry`,
 `fractal_optimize_portfolio`, the `fractal_dimension_*` family) are also
 ordinary functions you can chain directly when a Universal Agent is more than

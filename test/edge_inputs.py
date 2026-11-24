@@ -22,7 +22,7 @@ Exit status is nonzero when any function crashed or reported INTERNAL.
 """
 import json, os, re, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # python3 -I drops the script dir
-from harness_common import (signature_policy, PLUGINS, SAN, DIST, CLEAN_ENV, MOCK_FILES, san_runtime, latest_cli, band_file, run_cli)
+from harness_common import (signature_policy, PLUGINS, SAN, DIST, CLEAN_ENV, MOCK_FILES, san_runtime, latest_cli, band_file, run_cli, timeout_for)
 
 LINE = os.environ.get("EDGE_LINE", "15")
 CLI = latest_cli(LINE)
@@ -149,7 +149,7 @@ def run_script(sql, env):
     # masks (the engine's SEH handler turns the fault into an ordinary error) and a sanitizer build names.
     script = f"LOAD '{EXT}';\n{sql}\nSELECT fractal_release();\n"
     p = run_cli([CLI, "-unsigned", "-csv", "-noheader"], input=script,
-                capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=900)
+                capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=timeout_for(900))
     out = p.stdout + p.stderr
     if "destructive latch is set" in out and (BAD.search(out) or p.returncode < 0 or p.returncode >= 128):
         # fractal_release() is refused while the destructive latch is set (fractal_lock_destructive), so the
@@ -159,7 +159,7 @@ def run_script(sql, env):
         # has nothing left to race.
         p = run_cli([CLI, "-unsigned", "-csv", "-noheader"], input=script,
                     capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    env=dict(env, FRACTALSQL_HOST_CLOSE="off"), timeout=900)
+                    env=dict(env, FRACTALSQL_HOST_CLOSE="off"), timeout=timeout_for(900))
     return p
 
 def check(name, stmts, env, label):

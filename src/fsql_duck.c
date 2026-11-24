@@ -1087,6 +1087,15 @@ void fsql_bind_capture_conn(duckdb_bind_info info) {
     duckdb_scalar_function_set_bind_data(info, id, free);
 }
 
+/* The connection id of a table function's bind: the diversify-aware searches use the calling connection's core context. */
+idx_t fsql_bind_conn_id(duckdb_bind_info info) {
+    duckdb_client_context ctx = NULL;
+    idx_t id = 0;
+    duckdb_table_function_get_client_context(info, &ctx);
+    if (ctx) { id = duckdb_client_context_get_connection_id(ctx); duckdb_destroy_client_context(&ctx); }
+    return id;
+}
+
 idx_t fsql_exec_conn_id(duckdb_function_info info) {
     idx_t *id = (idx_t *)duckdb_scalar_function_get_bind_data(info);
     return id ? *id : 0;

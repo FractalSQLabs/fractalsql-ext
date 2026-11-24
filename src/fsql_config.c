@@ -57,6 +57,15 @@ static const config_key kConfigKeys[] = {
     { "http_allow_plaintext","FSQL_REASONING_HTTP_ALLOW_PLAINTEXT", false },
     { "http_token",          "FSQL_REASONING_HTTP_TOKEN",         true  },
     { "enterprise_lib",      "FRACTALSQL_ENTERPRISE_LIB",         false },
+    { "enterprise_require_signature", "FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE", false },   /* on only: the library's signature is required (the default); opting out is an operator setting */
+    { "text_to_sql_allowed_statements", "FRACTALSQL_TEXT_TO_SQL_ALLOWED_STATEMENTS", false },   /* select (default) | select_insert_update */
+    { "text_to_sql_use_review",   "FRACTALSQL_TEXT_TO_SQL_USE_REVIEW",   false },   /* a second model reviews each generated statement */
+    { "ledger_retention",    "FRACTALSQL_LEDGER_RETENTION",       false },   /* fade (default) | exact */
+    { "ledger_max_bytes",    "FSQL_DUCKDB_LEDGER_MAX_BYTES",      false },   /* the in-memory audit ledger may not grow past this many bytes (default 268435456; 0 = unlimited); appends past it are refused */
+    { "agent_partial_reasoning_fail", "FRACTALSQL_AGENT_PARTIAL_REASONING_FAIL", false },   /* off (default): an agent raises when its reasoning step fails; on: it returns its computed half plus reasoning_step_failed */
+    { "agent_use_index",     "FRACTALSQL_AGENT_USE_INDEX",        false },   /* off (default), on or auto: the agents search through a fractal_index */
+    { "agent_index_min_rows","FRACTALSQL_AGENT_INDEX_MIN_ROWS",   false },   /* auto mode: the smallest table searched through an index (default 10000) */
+    { "agent_context_row_bytes","FRACTALSQL_AGENT_CONTEXT_ROW_BYTES", false },   /* the longest text cell the retrieval agents pass to the model (default 8192; 0 = no limit) */
 };
 #define N_KEYS (sizeof kConfigKeys / sizeof kConfigKeys[0])
 
@@ -108,6 +117,34 @@ static void config_get_fn(duckdb_function_info info, duckdb_data_chunk in, duckd
     }
 }
 
+/* fractal_config_keys() -> VARCHAR: a JSON array of {name, type, session_overridable} for every key, so a caller
+ * can discover the knobs instead of hard-coding them. type is string, path, int, bool or enum (agent_use_index is
+ * an enum: off, on, auto). Every key is changed with fractal_config_set, so session_overridable is true. */
+static const char *key_type(const char *k) {
+    static const char *const ints[]  = { "http_num_ctx", "agent_index_min_rows", "agent_context_row_bytes", "ledger_max_bytes" };
+    static const char *const bools[] = { "http_allow_plaintext", "enterprise_require_signature", "text_to_sql_use_review", "agent_partial_reasoning_fail" };
+    static const char *const enums[] = { "text_to_sql_allowed_statements", "ledger_retention", "agent_use_index" };
+    static const char *const paths[] = { "reasoning_plugin", "enterprise_lib" };
+    for (size_t i = 0; i < sizeof ints / sizeof *ints; i++) if (!strcmp(k, ints[i])) return "int";
+    for (size_t i = 0; i < sizeof bools / sizeof *bools; i++) if (!strcmp(k, bools[i])) return "bool";
+    for (size_t i = 0; i < sizeof enums / sizeof *enums; i++) if (!strcmp(k, enums[i])) return "enum";
+    for (size_t i = 0; i < sizeof paths / sizeof *paths; i++) if (!strcmp(k, paths[i])) return "path";
+    return "string";
+}
+
+static void config_keys_fn(duckdb_function_info info, duckdb_data_chunk in, duckdb_vector out) {
+    (void)info;
+    fsql_sb sb; fsql_sb_init(&sb);
+    fsql_sb_printf(&sb, "[");
+    for (size_t i = 0; i < N_KEYS; i++)
+        fsql_sb_printf(&sb, "%s{\"name\":\"%s\",\"type\":\"%s\",\"session_overridable\":true}",
+                       i ? "," : "", kConfigKeys[i].key, key_type(kConfigKeys[i].key));
+    fsql_sb_printf(&sb, "]");
+    const char *j = fsql_sb_cstr(&sb);
+    for (idx_t i = 0, n = duckdb_data_chunk_get_size(in); i < n; i++) fsql_set_str(out, i, j, strlen(j));
+    fsql_sb_free(&sb);
+}
+
 /* fractal_config_set(key, value) -> BOOLEAN. An empty value unsets the variable: the plugin reads a
  * missing variable as "not configured", which is how a setting is turned off again. */
 static void config_set_fn(duckdb_function_info info, duckdb_data_chunk in, duckdb_vector out) {
@@ -124,6 +161,76 @@ static void config_set_fn(duckdb_function_info info, duckdb_data_chunk in, duckd
         if (!e) return;
         char *value = fsql_xstrndup(val, vlen);
         if (!value) { fsql_fn_error(info, "fractalsql: out of memory"); return; }
+        if (strcmp(e->key, "ledger_retention") == 0 && *value && strcmp(value, "fade") != 0 && strcmp(value, "exact") != 0) {
+            free(value);
+            fsql_fn_error(info, "fractalsql: 'ledger_retention' must be one of: fade, exact");
+            return;
+        }
+        if (strcmp(e->key, "ledger_max_bytes") == 0) {
+            char *end = NULL;
+            long long v = strtoll(value, &end, 10);
+            if (*value && (*end != '\0' || v < 0 || v > 68719476736LL)) {
+                fsql_fn_error(info, "fractalsql: 'ledger_max_bytes' must be an integer between 0 and 68719476736 (0 = unlimited)");
+                free(value);
+                return;
+            }
+        } else if (strcmp(e->key, "agent_index_min_rows") == 0 || strcmp(e->key, "agent_context_row_bytes") == 0) {
+            long long lim = strcmp(e->key, "agent_index_min_rows") == 0 ? 2000000 : 1048576;
+            char *end = NULL;
+            long long v = strtoll(value, &end, 10);
+            if (!*value || *end != '\0' || v < 0 || v > lim) {
+                fsql_fn_error(info, "fractalsql: '%s' must be an integer between 0 and %lld", e->key, lim);
+                free(value);
+                return;
+            }
+        } else if (strcmp(e->key, "agent_use_index") == 0) {
+            /* off (stored as empty, which unsets the variable), on (1) or auto; the old boolean spellings still mean on / off */
+            static const char *const on_vals[] = { "on", "1", "true", "yes" }, *const off_vals[] = { "off", "0", "false", "no", "" };
+            int state = -1;
+            for (size_t v = 0; v < sizeof on_vals / sizeof on_vals[0]; v++) if (strcmp(value, on_vals[v]) == 0) state = 1;
+            for (size_t v = 0; v < sizeof off_vals / sizeof off_vals[0]; v++) if (strcmp(value, off_vals[v]) == 0) state = 0;
+            if (strcmp(value, "auto") == 0) state = 2;
+            if (state < 0) {
+                fsql_fn_error(info, "fractalsql: 'agent_use_index' must be one of: off, on, auto");
+                free(value);
+                return;
+            }
+            if (state != 2) { value[0] = state ? '1' : '\0'; if (state) value[1] = '\0'; }
+        } else if (strcmp(e->key, "text_to_sql_allowed_statements") == 0) {
+            if (*value && strcmp(value, "select") != 0 && strcmp(value, "select_insert_update") != 0) {
+                fsql_fn_error(info, "fractalsql: 'text_to_sql_allowed_statements' must be one of: select, select_insert_update");
+                free(value);
+                return;
+            }
+        } else if (strcmp(e->key, "enterprise_require_signature") == 0) {
+            /* SQL can only make the requirement stricter (on, or empty = the default, which is on). Turning it off lets an unsigned
+             * library load, which is the operator's decision: set FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 in the environment. */
+            static const char *const on_vals[] = { "on", "1", "true", "yes", "" };
+            int ok = 0;
+            for (size_t v = 0; v < sizeof on_vals / sizeof on_vals[0]; v++) if (strcmp(value, on_vals[v]) == 0) ok = 1;
+            if (!ok) {
+                fsql_fn_error(info, "fractalsql: 'enterprise_require_signature' can only be turned on from SQL (on, the default); turning the "
+                                    "signature requirement off is an operator setting: set FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0 in the environment");
+                free(value);
+                return;
+            }
+            value[0] = *value ? '1' : '\0';
+            if (*value) value[1] = '\0';
+        } else if (strcmp(e->key, "http_allow_plaintext") == 0 || strcmp(e->key, "text_to_sql_use_review") == 0 || strcmp(e->key, "agent_partial_reasoning_fail") == 0) {
+            /* the on/off keys: the same spellings every FractalSQL host accepts, stored the way the plugin reads them
+             * (1 = on, empty = off, which unsets the variable) */
+            static const char *const on_vals[] = { "on", "1", "true", "yes" }, *const off_vals[] = { "off", "0", "false", "no", "" };
+            int state = -1;
+            for (size_t v = 0; v < sizeof on_vals / sizeof on_vals[0]; v++) if (strcmp(value, on_vals[v]) == 0) state = 1;
+            for (size_t v = 0; v < sizeof off_vals / sizeof off_vals[0]; v++) if (strcmp(value, off_vals[v]) == 0) state = 0;
+            if (state < 0) {
+                fsql_fn_error(info, "fractalsql: '%s' must be one of: on, off", e->key);
+                free(value);
+                return;
+            }
+            value[0] = state ? '1' : '\0';
+            if (state) value[1] = '\0';
+        }
         fsql_apply_env(e->env, value);
         /* The chat, text-to-SQL and review tiers apply the operator's own settings when they load, from
          * a copy taken at extension init -- a change made here has to reach that copy too. */
@@ -150,6 +257,7 @@ static void release_fn(duckdb_function_info info, duckdb_data_chunk in, duckdb_v
  * state, so it is not folded or reordered. */
 static const fsql_scalar_def kConfigDefs[] = {
     { "fractal_config_get", 1, { FSQL_T_VARCHAR },                  FSQL_T_VARCHAR, config_get_fn, NULL, 0 },
+    { "fractal_config_keys", 0, { 0 },                              FSQL_T_VARCHAR, config_keys_fn, NULL, 0 },
     { "fractal_config_set", 2, { FSQL_T_VARCHAR, FSQL_T_VARCHAR },  FSQL_T_BOOLEAN, config_set_fn, NULL, 0 },
     { "fractal_release", 0, { 0 },                              FSQL_T_BOOLEAN, release_fn,    NULL, FSQL_FN_VOLATILE },
 };

@@ -135,13 +135,19 @@ for line in 14 15 20; do
   if ! cc -std=c11 -O1 ${SAN:+-g -fsanitize=$SAN} -Wno-format-truncation -I"$hdr" "$HERE/lifecycle_test.c" -L"$lib" -lduckdb -lpthread -Wl,-rpath,"$lib" -o "$bin" 2>"$OUT/cc.log"; then
     F "lifecycle ${line}.x: the test did not build ($(head -c 200 "$OUT/cc.log"))"; continue
   fi
+  # The per-mode budget. A sanitizer build pays the instrumented overhead on
+  # every statement, so a mode that fits the budget uninstrumented -- the
+  # nine-database "multi" mode especially -- can overrun it instrumented, and
+  # a timeout there is a budget, not a defect.
+  budget=240
+  [ -n "$SAN" ] && budget=900
   for mode in ${CAPI_LIFECYCLE_MODES:-release nopool race plain defaults churn alias checkpoint off departrace thaw multi parallel}; do
     rounds="$ROUNDS"
     case "$mode" in defaults) rounds=1 ;; departrace) rounds="${CAPI_DEPARTRACE_ROUNDS:-15}" ;; esac
     log="$OUT/$line.$mode.log"
     load_guard
     # a hang must fail the run, not stall it
-    if ASAN_OPTIONS="$SAN_ASAN_OPTS" TSAN_OPTIONS="exitcode=0" nice timeout 240 $PIN $RUN_PREFIX "$bin" "$ext" "$OUT/t$line.db" "$mode" "$rounds" >"$log" 2>&1 \
+    if ASAN_OPTIONS="$SAN_ASAN_OPTS" TSAN_OPTIONS="exitcode=0" nice timeout "$budget" $PIN $RUN_PREFIX "$bin" "$ext" "$OUT/t$line.db" "$mode" "$rounds" >"$log" 2>&1 \
        && { [ "$SAN" != thread ] || [ "$(tsan_ours "$log")" = 0 ]; }; then
       P "lifecycle ${line}.x $mode: closes cleanly ($(grep -c '^  PASS' "$log") checks over $rounds rounds)"
     else

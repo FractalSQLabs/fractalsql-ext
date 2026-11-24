@@ -44,13 +44,13 @@ stable-API build under two names; `v1.4.5` is a separate build for DuckDB's 1.4
 line, which the DuckDB loader refuses on any other 1.4.x release. That is why
 the version is part of the bundle name.
 
-## Version table (v2.0.1)
+## Version table (v2.0.2)
 
 | Component | Version |
 | --- | --- |
-| fractalsql-ext extension (Community) | 2.0.1 (`SELECT fractal_version();`) |
+| fractalsql-ext extension (Community) | 2.0.2 (`SELECT fractal_version();`) |
 | Edition reported by `fractal_edition()` | `Community` |
-| Vendored reasoning plugin (`fractalsql-reasoning-http`) | `reasoning-http v1.4.2` (see `include/REASONING_VERSION`) |
+| Vendored reasoning plugin (`fractalsql-reasoning-http`) | `reasoning-http v1.4.3` (see `include/REASONING_VERSION`) |
 | FractalSQL core archive inside the extension | see `include/VERSION` |
 | DuckDB versions shipped | v1.4.5, v1.5.6, v2.0.0 |
 

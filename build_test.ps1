@@ -27,8 +27,8 @@
 #                        dist\windows-ubsan\, plus an instrumentedness
 #                        probe.
 #   02  smoke            fractal_version()/fractal_edition() =
-#                        2.0.0/"Community", fractal_search convergence,
-#                        fractal_search_debug's best_point JSON
+#                        2.0.0/"Community", fractal_sfs_converge convergence,
+#                        fractal_sfs_converge_debug's best_point JSON
 #   03  schema_context   fractal_schema_context(): PK / NOT NULL / FK
 #                        rendering + 0-arg auto-discovery
 #   04  text_to_sql      SELECT-only allowlist end to end: stacked,
@@ -110,7 +110,7 @@
 #                        cleanly (ledger_flush/audit_log), and a
 #                        configured-but-unloadable enterprise LIB
 #                        surfaces the loader error, a distinct message
-#   25  enterprise_stress  [skips without a vendored enterprise core;
+#   25  enterprise_stress  [runs against the real enterprise core when FSQL_TEST_ENTERPRISE_LIB names one, else the mock core;
 #                        see the driver for the in-process concurrency
 #                        and churn scope this port keeps]
 #   26  enterprise_signature  load-boundary ordering: the missing-lib
@@ -170,7 +170,25 @@
 #                        runtime's environment. The mock fixtures in
 #                        tests\ read no environment at all, so no other
 #                        gate can catch a regression there.
-#   47  fuzz_parse        (-Fuzz only) libFuzzer over the extension's OWN
+#   47  capi_parity      the parity corpus (test\parity_diff.py): every case in
+#                        test\parity\*.sql runs through the extension on the 1.5.x
+#                        CLI (the reference line) and on every other CLI this
+#                        host has; the outputs must agree, and each case's
+#                        written expectation must hold. Needs a python and a
+#                        gcc-style compiler (FSQL_CC) for the mock plugins,
+#                        and a 1.5.x CLI.
+#   48  capi_sanitize    the same corpus against the INSTRUMENTED extension, on
+#                        the instrumented CLI (a sanitizer cell only: -Asan /
+#                        -Ubsan). MSVC's and clang-cl's sanitizers link their
+#                        runtime into the binary, so there is nothing to
+#                        preload and any report fails the case.
+#   49  capi_lifecycle   a file database with the extension loaded closes
+#                        cleanly, checkpoints (no .wal is left behind) and
+#                        reopens with its rows; the descriptor and thread
+#                        counts build_test.sh's gate 49 measures from inside
+#                        its C harness are not observable the same way here.
+#   51  capi_lifecycle_san  gate 49's file-level claim under a sanitizer cell.
+#   52  fuzz_parse        (-Fuzz only) libFuzzer over the extension's OWN
 #                        parser for a model's reply (src\fsql_parse.c): the
 #                        reply is untrusted input, so the code that turns it
 #                        into SQL is attack surface. The target carries no
@@ -193,7 +211,7 @@
 # Gate sets:
 #
 #   (default)        01 02 03 .. 20 22 .. 32 34 35 (33 is Tsan-only and
-#                                                   21/47 are Fuzz-only)
+#                                                   21/52 are Fuzz-only)
 #   -Quick           01 02                     pre-push smoke
 #   -Rebuild         (any set)                 rebuild the extension
 #                                              first when the artifact
@@ -382,6 +400,40 @@ $script:REVIEWDUMP  = Join-Path $script:BTROOT "fractalsql_bt_review_env_dump.tx
 $script:REVIEWTXT  = Join-Path $script:BTROOT "fractalsql_bt_review.txt"
 $script:REVIEWPROMPT = Join-Path $script:BTROOT "fractalsql_bt_review_prompt.txt"
 
+# One run at a time per machine. Those fixture files live at a fixed path
+# under $BTROOT, and a run removes them when it ends -- so a second run
+# overlapping this one deletes this run's canned replies mid-gate. The mock
+# plugin answers a default when its reply file is gone, and that default is
+# a valid statement, so the gate then reports a failure that looks like a
+# real one. The lock is a file no other run may open; the handle is held for
+# the lifetime of the process, so it is released even when the run is killed.
+# The name is shared with the other hosts that use the same fixture files.
+#
+# The owner records who it is in a second, readable file: the lock file
+# itself cannot be read while it is held (that is the point of it), so a
+# refused run would otherwise have no way to say WHO to wait for.
+$script:LOCKFILE   = Join-Path $script:BTROOT "fractalsql_bt.lock"
+$script:LOCKOWNER  = Join-Path $script:BTROOT "fractalsql_bt.lock.owner"
+$script:LOCKHANDLE = $null
+function acquire_run_lock {
+  for ($i = 0; $i -lt 20; $i++) {
+    try {
+      $script:LOCKHANDLE = [IO.File]::Open($script:LOCKFILE, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+      try {
+        [IO.File]::WriteAllText($script:LOCKOWNER,
+          ("pid " + $PID + " started " + (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") + " on " + $env:COMPUTERNAME))
+      } catch { }
+      return $true
+    } catch {
+      Start-Sleep -Milliseconds 250
+    }
+  }
+  return $false
+}
+function lock_holder {
+  try { return [IO.File]::ReadAllText($script:LOCKOWNER).Trim() } catch { return "" }
+}
+
 # Mutable run state.
 $script:PDIR        = ""
 $script:PDIRSEP     = "\"
@@ -412,6 +464,18 @@ function cleanup {
   foreach ($f in @($script:SQLTXT, $script:EVILTRIG, $script:RETRYPROMPT, $script:THINKDUMP, $script:REVIEWDUMP, $script:REVIEWTXT, $script:REVIEWPROMPT)) {
     Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
   }
+  # The run lock: the owner file goes first (it is ours while we still hold
+  # the lock), then the handle is closed, then the lock file itself. The
+  # close has to come before the lock file's removal -- the handle was
+  # opened without FILE_SHARE_DELETE, so the file cannot be removed while
+  # it is open. A removal that fails because another run grabbed the lock
+  # in between is harmless: that run holds its own handle.
+  Remove-Item -LiteralPath $script:LOCKOWNER -Force -ErrorAction SilentlyContinue
+  if ($script:LOCKHANDLE) {
+    try { $script:LOCKHANDLE.Close() } catch { }
+    $script:LOCKHANDLE = $null
+  }
+  Remove-Item -LiteralPath $script:LOCKFILE -Force -ErrorAction SilentlyContinue
 }
 
 # Output shape: "  [PASS] <label>" lines under one "== Gate NN: title"
@@ -1479,19 +1543,19 @@ function gate_01 {
 
 function gate_02 {
   $r = sqlq "SELECT fractal_version();"; $rc = $script:SQLQ_RC
-  expect_ok $rc $r "fractal_version() reports 2.0.1" "2.0.1"
+  expect_ok $rc $r "fractal_version() reports 2.0.2" "2.0.2"
   $r = sqlq "SELECT fractal_edition();"; $rc = $script:SQLQ_RC
   expect_ok $rc $r "fractal_edition() reports Community" "Community"
   # smoke search: identical points converge onto the query point itself
-  $r = sqlq "SELECT fractal_search([0.6, 0.8, 0.0, 0.0]::DOUBLE[], [0.6, 0.8, 0.0, 0.0]::DOUBLE[]);"; $rc = $script:SQLQ_RC
+  $r = sqlq "SELECT fractal_sfs_converge([0.6, 0.8, 0.0, 0.0]::DOUBLE[], [0.6, 0.8, 0.0, 0.0]::DOUBLE[]);"; $rc = $script:SQLQ_RC
   if (($rc -eq 0) -and (num_abs_lt_1e6 $r)) {
-    pass "fractal_search converges on an identical point (|d| < 1e-6)"
+    pass "fractal_sfs_converge converges on an identical point (|d| < 1e-6)"
   } else {
-    fail "fractal_search convergence smoke"
+    fail "fractal_sfs_converge convergence smoke"
     Write-Host ("      got rc=" + $rc + ": " + (trunc $r))
   }
-  $r = sqlq "SELECT fractal_search_debug([0.6, 0.8, 0.0, 0.0]::DOUBLE[], 30, 50, 2);"; $rc = $script:SQLQ_RC
-  expect_ok $rc $r "fractal_search_debug reports best_point" "best_point"
+  $r = sqlq "SELECT fractal_sfs_converge_debug([0.6, 0.8, 0.0, 0.0]::DOUBLE[], 30, 50, 2);"; $rc = $script:SQLQ_RC
+  expect_ok $rc $r "fractal_sfs_converge_debug reports best_point" "best_point"
   # The CI smoke test (test/smoke_test.sql) is self-checking: every
   # assertion calls error(), which -bail turns into a non-zero exit.
   # Run the file itself rather than a copy of its checks, so the two
@@ -1656,7 +1720,7 @@ function gate_04 {
 
 function gate_05 {
   if (-not (have_plugin "evil_nonterminating_plugin")) {
-    skip "evil_nonterminating fixture needs mmap/mprotect (POSIX-only); a guard-page analog is not wired in this harness"
+    skip "the evil_nonterminating test plugin needs mmap and mprotect, which Windows does not have, and there is no Windows equivalent yet"
     return
   }
   wc_file $script:SQLTXT "SELECT 42"
@@ -1860,8 +1924,8 @@ base.execute("DELETE FROM bt_soak")
 def worker(w):
     c = base.cursor()
     for i in range(1, I + 1):
-        got = c.execute("SELECT fractal_search(vec, vec) FROM bt_telemetry WHERE id = 1;").fetchone()
-        assert got is not None, "fractal_search returned no row"
+        got = c.execute("SELECT fractal_sfs_converge(vec, vec) FROM bt_telemetry WHERE id = 1;").fetchone()
+        assert got is not None, "fractal_sfs_converge returned no row"
         c.execute(f"INSERT INTO bt_soak VALUES ({w}, {i}, 'bt-soak')")
     c.close()
 
@@ -2205,11 +2269,11 @@ function gate_18 {
   expect_ok $rc $r "both crash-source rows embedded after the recovery drain" "2"
 }
 function gate_19 {
-  $r = sqlq "SELECT fractal_search([]::DOUBLE[], []::DOUBLE[]);"; $rc = $script:SQLQ_RC
+  $r = sqlq "SELECT fractal_sfs_converge([]::DOUBLE[], []::DOUBLE[]);"; $rc = $script:SQLQ_RC
   expect_err "query dim 0 out of range [1, 4096]" $rc $r "empty query vector rejected at the dim bound"
   # over-arena: a constant 4097-element list (one over the cap)
   $big = ((0..4096) | ForEach-Object { "0.1" }) -join ","
-  $r = sqlq ("SELECT fractal_search([" + $big + "]::DOUBLE[], [" + $big + "]::DOUBLE[]);")
+  $r = sqlq ("SELECT fractal_sfs_converge([" + $big + "]::DOUBLE[], [" + $big + "]::DOUBLE[]);")
   $rc = $script:SQLQ_RC
   expect_err "out of range [1, 4096]" $rc $r "4097-dim query rejected at the vector cap"
   $r = sqlq "SELECT particle FROM fractal_search_explore('bt_explore','embedding',[0.5, 0.5]::DOUBLE[], NULL);"
@@ -2741,6 +2805,8 @@ function gate_22 {
     fail "periodogram"
     Write-Host ("      got rc=" + $rc + ": " + (trunc $r))
   }
+  $r = sqlq ("SELECT string_agg(column_name, ',') FROM (DESCRIBE SELECT * FROM fractal_periodogram([" + $s + "]::DOUBLE[], 3));"); $rc = $script:SQLQ_RC
+  expect_ok $rc $r "periodogram columns are named freq and power" "freq,power"
   # -- fractal_spectrogram_entropy: short-time spectral entropy, a plain
   # DOUBLE[] (a period-8 tone, 64 samples, window 16 / hop 8 -> 7 frames) --
   $tone = "[sin(2 * pi() * t / 8.0) for t in range(0, 64)]"
@@ -2873,6 +2939,19 @@ function gate_22 {
   $r = sqlq "SELECT fractal_detect_collapse();"
   $rc = $script:SQLQ_RC
   expect_ok $rc $r "detect_collapse responds" "-nan"
+  # ...but the telemetry search of the same connection feeds the diversify monitor: after a warm window of searches on a connection with
+  # diversify on, the diversity quotient is a real number
+  $dq = "CREATE OR REPLACE TABLE dq_t AS SELECT i AS id, [(i*7%97)/97.0, (i*13%89)/89.0, (i*5%83)/83.0]::DOUBLE[] AS emb FROM range(1,60) t(i); SELECT fractal_diversify_enable(); SELECT fractal_diversify_set_params(8, NULL, 0.3, 0.5);"
+  foreach ($g in 0..9) {
+    $dq += (" SELECT count(*) FROM fractal_search_telemetry('dq_t','emb',[{0:F2},{1:F2},{2:F2}]::float8[],3);" -f (0.9 - $g * 0.05), (0.5 + $g * 0.05), (($g - 3) * 0.1))
+  }
+  $r = sqlq ($dq + " SELECT fractal_detect_collapse(); DROP TABLE dq_t;")
+  $last = (($r -split "`n") | Where-Object { $_.Trim() -ne "" -and $_.Trim() -ne "true" } | Select-Object -Last 1)
+  if ($script:SQLQ_RC -eq 0 -and $last -match '^\s*-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?\s*$') {
+    pass ("22 vector_api: detect_collapse is a real number after a warm window of telemetry searches on a diversify-enabled connection (" + $last.Trim() + ")")
+  } else {
+    fail ("22 vector_api: detect_collapse after warm telemetry searches was '" + $last + "'")
+  }
   # -- vector math --
   $r = sqlq "SELECT fractal_vector_lp_distance([1.0, 0.0, 0.0]::FLOAT[], [0.5, 0.0, 0.0]::FLOAT[], 2.0);"
   $rc = $script:SQLQ_RC
@@ -2901,6 +2980,13 @@ function gate_22 {
 }
 
 function gate_23 {
+    # the settings table in the reasoning-setup guide names every configuration key this build defines
+    $dcPy = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $dcPy) { $dcPy = Get-Command python3 -ErrorAction SilentlyContinue }
+    if ($dcPy) {
+        $dcOut = (& $dcPy.Source -I (Join-Path $script:HERE 'test\check_config_docs.py') $script:HERE 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0) { pass ("23 agents: " + ($dcOut -replace '^check_config_docs: ', '')) } else { fail ("23 agents: " + ($dcOut -replace '^check_config_docs: ', '')) }
+    } else { skip "23 agents: the settings-table check needs python" }
   $embenv = @(("FRACTALSQL_REASONING_PLUGIN=" + (pj "mock_embed_plugin")),
               "FSQL_REASONING_HTTP_EMBED_URL=https://embed.invalid/v1/embeddings")
   # the search/rag agents embed their query through the EMBED tier (the
@@ -2929,7 +3015,7 @@ function gate_23 {
   # search_agent: embed (mock), scan, answer (chat mock) -- the shape is
   # everything, the content is canned
   $r = sqlq_env -EnvPairs $embenv `
-      "SELECT (answer IS NOT NULL) AND (len(source_doc_ids) >= 1) FROM fractal_search_agent('near doc-1','bt_agent_docs','emb',50,30);"
+      "SELECT (answer IS NOT NULL) AND (len(source_row_ids) >= 1) FROM fractal_search_agent('near doc-1','bt_agent_docs','emb',50,30);"
   $rc = $script:SQLQ_RC
   expect_ok $rc $r "search_agent embeds, scans, and answers with doc ids" "true"
   # rag_agent: same pipeline minus the answer synthesis
@@ -2937,6 +3023,42 @@ function gate_23 {
       "SELECT (answer IS NOT NULL) FROM fractal_rag_agent('near doc-1','bt_agent_docs','emb','{}');"
   $rc = $script:SQLQ_RC
   expect_ok $rc $r "rag_agent returns an answer row" "true"
+  # retrieval: meta_filter, row ids, the index path (agent_use_index off/on/auto), the context budget, fractal_index_ensure, chunk_text
+  # (a port of build_test.sh gate 23's retrieval block; not yet run on Windows)
+  $r = sqlq_env -EnvPairs $embenv "SELECT json_extract(fractal_index_ensure('bt_agent_docs','emb','{`"name`":`"bt_agent_ix`",`"id_col`":`"id`",`"vector_format`":`"FP32`",`"nlist`":2}'),'`$.action');"
+  expect_ok $script:SQLQ_RC $r "ensure builds the index when there is none (created)" '"created"'
+  $r = sqlq "SELECT json_extract(fractal_index_ensure('bt_agent_docs','emb'),'`$.action');"
+  expect_ok $script:SQLQ_RC $r "ensure on a fit index changes nothing (unchanged)" '"unchanged"'
+  $r = sqlq "INSERT INTO bt_agent_docs VALUES (6, 'doc-6', 'doc-f late arrival', [0.9, 0.2, 0.0]);" "SELECT json_extract(fractal_index_ensure('bt_agent_docs','emb'),'`$.action');"
+  expect_ok $script:SQLQ_RC $r "ensure folds in a few added rows (refreshed)" '"refreshed"'
+  $r = sqlq "INSERT INTO bt_agent_docs SELECT 100 + i, 'doc-x', 'extra ' || i, [0.3, 0.3, 0.9]::DOUBLE[] FROM range(10) t(i);" "SELECT json_extract(fractal_index_ensure('bt_agent_docs','emb'),'`$.action');"
+  expect_ok $script:SQLQ_RC $r "ensure rebuilds after more than a quarter of the rows were added (rebuilt)" '"rebuilt"'
+  $r = sqlq_env -EnvPairs $embenv "SELECT used_index FROM fractal_rag_agent('near doc-1','bt_agent_docs','emb','{}');"
+  expect_ok $script:SQLQ_RC $r "rag_agent scans by default (used_index false)" "false"
+  $r = sqlq_env -EnvPairs $embenv "SELECT fractal_config_set('agent_use_index','on');" "SELECT used_index FROM fractal_rag_agent('near doc-1','bt_agent_docs','emb','{}');"
+  expect_ok $script:SQLQ_RC (($r -split "`n" | Select-Object -Last 1).Trim()) "agent_use_index on sends rag_agent through the index (used_index true)" "true"
+  $r = sqlq "SELECT fractal_config_set('agent_use_index','sometimes');"
+  expect_err "must be one of: off, on, auto" $script:SQLQ_RC $r "agent_use_index refuses a value that is not off, on or auto"
+  $r = sqlq "SELECT fractal_config_set('text_to_sql_allowed_statements','select_insert_update');" "SELECT fractal_config_get('text_to_sql_allowed_statements');" "SELECT fractal_config_set('text_to_sql_use_review','on');" "SELECT fractal_config_get('text_to_sql_use_review');"
+  expect_ok $script:SQLQ_RC (($r -split "`r?`n" | Where-Object { $_ -ne '' }) -join ' ') "the text-to-SQL keys are settable and read back" "true select_insert_update true 1"
+  $r = sqlq "SELECT fractal_config_keys() LIKE '%{`"name`":`"agent_use_index`",`"type`":`"enum`",`"session_overridable`":true}%' AND fractal_config_keys() LIKE '%{`"name`":`"http_num_ctx`",`"type`":`"int`",%';"
+  expect_ok $script:SQLQ_RC (($r -split "`r?`n" | Where-Object { $_ -ne '' }) -join ' ') "fractal_config_keys lists each key with its type and session scope" "true"
+  $r = sqlq "SELECT fractal_config_set('text_to_sql_allowed_statements','delete');"
+  expect_err "must be one of: select, select_insert_update" $script:SQLQ_RC $r "text_to_sql_allowed_statements refuses a value outside its choices"
+  $r = sqlq "SELECT fractal_config_set('text_to_sql_use_review','maybe');"
+  expect_err "must be one of: on, off" $script:SQLQ_RC $r "text_to_sql_use_review refuses a value that is not on or off"
+  $r = sqlq "SELECT fractal_config_set('enterprise_require_signature','on');" "SELECT fractal_config_get('enterprise_require_signature');"
+  expect_ok $script:SQLQ_RC (($r -split "`r?`n" | Where-Object { $_ -ne '' }) -join ' ') "enterprise_require_signature can be turned on from SQL" "true 1"
+  $r = sqlq "SELECT fractal_config_set('enterprise_require_signature','off');"
+  expect_err "can only be turned on from SQL" $script:SQLQ_RC $r "enterprise_require_signature cannot be turned off from SQL (an operator setting)"
+  $r = sqlq_env -EnvPairs $embenv "SELECT list_sort(source_row_ids) = (SELECT list_sort(list(rowid)) FROM bt_agent_docs WHERE tag = 'doc-3') FROM fractal_rag_agent('near doc-3','bt_agent_docs','emb','{`"tag`":`"doc-3`"}');"
+  expect_ok $script:SQLQ_RC $r "meta_filter limits the scan to the matching rows, and source_row_ids are their row ids" "true"
+  $r = sqlq_env -EnvPairs $embenv "SELECT * FROM fractal_rag_agent('q','bt_agent_docs','emb','{`"tag`":`"nope`"}');"
+  expect_err "for that meta_filter" $script:SQLQ_RC $r "a meta_filter that matches no row is an error, never ignored"
+  $r = sqlq "SELECT fractal_chunk_text('abcdefghij', 4, 1, 'fixed');"
+  expect_ok $script:SQLQ_RC $r "chunk_text fixed, size 4, overlap 1" '[{"no":0,"start":0,"end":4,"text":"abcd"},{"no":1,"start":3,"end":7,"text":"defg"},{"no":2,"start":6,"end":10,"text":"ghij"}]'
+  $r = sqlq "SELECT fractal_chunk_text('x', 5, 5);"
+  expect_err "overlap must be 0..size-1" $script:SQLQ_RC $r "chunk_text refuses an overlap of size or more"
   # sql_agent: never executes under auto_execute=false, reports the
   # pipeline status per row
   wc_file $script:SQLTXT "SELECT count(*) FROM bt_agent_docs"
@@ -3046,10 +3168,25 @@ function gate_25 {
     skip "python driver gate under -Asan/-Ubsan: the pip-duckdb host process cannot be instrumented (known Windows load_extension issue)"
     return
   }
-  $entlib = $env:FSQL_TEST_ENTERPRISE_LIB
+  # the real core when FSQL_TEST_ENTERPRISE_LIB names it, otherwise the mock core (test\mock_enterprise.c, built by the test harness)
+  $origEntlib = $env:FSQL_TEST_ENTERPRISE_LIB
+  $entlib = $origEntlib
   if ((-not $entlib) -or (-not (Test-Path -LiteralPath $entlib))) {
-    skip "no enterprise core configured for stress (set FSQL_TEST_ENTERPRISE_LIB to a compiled enterprise core library)"
-    return
+    if ($script:PY) {
+      # harness_common compiles the mock core at import with the gcc-style compiler named by
+      # FSQL_CC -- the same one compile_plugins uses. Without it the import probes plain "gcc",
+      # which is not on a Windows runner's PATH, and the core is reported as never built.
+      $env:FSQL_CC = $script:CC
+      try {
+        $entlib = (& $script:PY -I -c "import sys; sys.path.insert(0, sys.argv[1]); from harness_common import PLUGINS; print(PLUGINS.get('mock_enterprise', ''))" (Join-Path $script:HERE "test") 2>$null | Select-Object -Last 1)
+      } finally {
+        Remove-Item Env:FSQL_CC -ErrorAction SilentlyContinue
+      }
+    }
+    if ((-not $entlib) -or (-not (Test-Path -LiteralPath $entlib))) {
+      fail "25 enterprise_stress: the mock enterprise core did not build (set FSQL_TEST_ENTERPRISE_LIB to use the real one)"
+      return
+    }
   }
   if (-not $script:PY) {
     skip "python with the pip duckdb package is unavailable (set FSQL_PYTHON)"
@@ -3119,6 +3256,7 @@ except Exception:
   [Environment]::SetEnvironmentVariable("FSQL_TEST_ENTERPRISE_LIB", $entlib, "Process")
   $r = py_run (Join-Path $script:PDIR "gate25.py")
   $rc = $script:SQLQ_RC
+  [Environment]::SetEnvironmentVariable("FSQL_TEST_ENTERPRISE_LIB", $origEntlib, "Process")
   expect_ok $rc $r "enterprise core absorbed the in-process churn (verify contract intact)" "gate-25-ok"
 }
 
@@ -3404,7 +3542,7 @@ function gate_33 {
   # TSan needs a sanitizer-instrumented host harness; the duckdb build
   # ships no make-wired TSan runner and the CLI host cannot be
   # dlopen-instrumented here
-  skip "no TSan-wired host harness in the duckdb build"
+  skip "no ThreadSanitizer run is set up for the duckdb build on this platform"
 }
 
 # Runs one vertical demo kit and returns the CLI's output as a string.
@@ -3936,11 +4074,11 @@ function gate_37 {
   mcp_driver_gate "37" "https" "mcp_https_smoke_client.py" @{ MCP_HTTPS_PORT = "$port"; MCP_HTTPS_CERT = (Join-Path $w "cert.pem"); MCP_HTTPS_KEY = (Join-Path $w "key.pem") }
 }
 function gate_38 { mcp_driver_gate "38" "cli" "mcp_cli.py" }
-# SECURITY_AUDIT.md 3.17, 3.18: the HTTP transport refuses lookalike origins and repeated headers (no engine needed)
+# The HTTP transport refuses lookalike origins and repeated headers (no engine needed)
 function gate_58 { mcp_driver_gate "58" "audit_http" "mcp_audit_http.py" }
 function gate_39 { mcp_probe_run "39" "db_probe" }
 function gate_40 { mcp_probe_run "40" "concurrency_probe" }
-function gate_41 { skip "41 mcp_faults (needs LD_PRELOAD (tests/oom_preload.c) and signals; Linux only)" }
+function gate_41 { skip "41 mcp_faults (not run on Windows: it needs LD_PRELOAD and signals, which are Linux only)" }
 
 # 42 mcp_fuzz (-Fuzz only): libFuzzer + ASan under clang-cl over the JSON-RPC front door and the argument coercion.
 function gate_42 {
@@ -3981,7 +4119,7 @@ function gate_42 {
   }
 }
 
-# 47 fuzz_parse (-Fuzz only): libFuzzer over the extension's OWN parser for a
+# 52 fuzz_parse (-Fuzz only): libFuzzer over the extension's OWN parser for a
 # model's reply (src/fsql_parse.c). The reply is untrusted input -- it is
 # whatever a language model said -- so the code that turns it into SQL is
 # attack surface, and the fuzzer drives exactly the functions the tier
@@ -4000,7 +4138,7 @@ function find_clang_cl {
   return $null
 }
 
-function gate_47 {
+function gate_52 {
   # The denied-call scan, case by case, in every spelling the SQL parser accepts (a comment or a quoted name before the
   # parenthesis). A plain C program: clang-cl or cl.exe builds it, and it needs no libFuzzer.
   $ccx = find_clang_cl
@@ -4025,7 +4163,7 @@ function gate_47 {
     }
   }
   $cl = find_clang_cl
-  if (-not $cl) { skip "47 fuzz_parse (no clang-cl on this machine; libFuzzer needs one)"; return }
+  if (-not $cl) { skip "52 fuzz_parse (no clang-cl on this machine; libFuzzer needs one)"; return }
   $w = Join-Path $script:PDIR "parsefuzz"
   New-Item -ItemType Directory -Force -Path $w | Out-Null
   $secs = if ($env:FSQL_FUZZ_TIME) { $env:FSQL_FUZZ_TIME } else { "30" }
@@ -4042,7 +4180,7 @@ function gate_47 {
         "tests\fuzz\fuzz_t2s_parse.c" "src\fsql_parse.c" "src\fsql_buf.c" `
         ("/Fe" + $bin) *> $log
   if ($LASTEXITCODE -ne 0) {
-    fail ("47 fuzz_parse: the driver failed to build; see " + $log)
+    fail ("52 fuzz_parse: the driver failed to build; see " + $log)
     Get-Content $log -Tail 8 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("         " + $_) }
     return
   }
@@ -4063,11 +4201,11 @@ function gate_47 {
   $so = $p.StandardOutput.ReadToEndAsync(); $se = $p.StandardError.ReadToEndAsync()
   $p.WaitForExit()
   if ($p.ExitCode -eq 0) {
-    pass ("47 fuzz_parse: fuzz_t2s_parse (" + $secs + "s, corpus-seeded, ASan+UBSan)")
+    pass ("52 fuzz_parse: fuzz_t2s_parse (" + $secs + "s, corpus-seeded, ASan+UBSan)")
   } else {
     $rl = Join-Path $w "run.log"
     ($so.Result + "`n" + $se.Result) | Out-File -FilePath $rl -Encoding utf8
-    fail ("47 fuzz_parse: fuzz_t2s_parse exited " + $p.ExitCode + "; see " + $rl)
+    fail ("52 fuzz_parse: fuzz_t2s_parse exited " + $p.ExitCode + "; see " + $rl)
     Get-Content $rl -Tail 12 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("         " + $_) }
   }
 }
@@ -4238,9 +4376,243 @@ function capi_py_run {
     FSQL_CC = $script:CC
     PYTHONIOENCODING = "utf-8"
     PYTHONUTF8 = "1"
+    FSQL_TEST_MOCK_REASONING = (pj "mock_reasoning_plugin")
   }
+  # A sanitizer cell pays the instrumented overhead on every statement, so the
+  # drivers' per-invocation budget has to scale with it -- otherwise a case
+  # that is slow under ASan expires mid-statement and the driver dies
+  # instead of reporting a result (the error table simply "did not finish").
+  if ($script:SAN) { $vars["FSQL_HARNESS_SAN_FACTOR"] = "10" }
   $old = @{}
   foreach ($k in $vars.Keys) { $old[$k] = [Environment]::GetEnvironmentVariable($k, "Process"); [Environment]::SetEnvironmentVariable($k, $vars[$k], "Process") }
+  try {
+    $out = (& $script:PYANY -I (Join-Path $script:HERE ("test\" + $script_name)) 2>&1 | plain_lines | Out-String -Width 8192)
+    $rc = $LASTEXITCODE
+  } finally {
+    foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $old[$k], "Process") }
+  }
+  return @{ out = $out; rc = $rc }
+}
+
+# 47 capi_parity: the parity corpus (test\parity_diff.py). Every case in test\parity\*.sql runs
+# through the pure-C extension on the 1.5.x CLI (the reference line) and on every other CLI this
+# host has, the outputs must agree, and a case carrying a written expectation must show it.
+#
+# Mirrors build_test.sh's gate 47. The corpus compares every line against the 1.5.x output, so
+# 1.5.x is the reference: with no 1.5.x CLI the gate skips and says so rather than pretending to
+# have compared anything.
+function gate_47 {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\parity_diff.py"))) { skip "47 capi_parity (no test\parity_diff.py)"; return }
+    if (-not $script:PYANY) { skip "47 capi_parity (no python interpreter: set FSQL_PYTHON_ANY)"; return }
+    if (-not $script:CC) { skip "47 capi_parity (no gcc-style compiler for the mock plugins: set FSQL_CC)"; return }
+    $lines = @()
+    foreach ($l in @("14", "15", "20")) {
+        $cli = capi_cli_for $l
+        if ($cli) { $lines += $l }
+    }
+    if ($lines.Count -eq 0) {
+        skip "47 capi_parity (no DuckDB CLI: set FSQL_DUCKDB_14/_15/_20, or put one under dist\cli\ or $HOME\duckdb-cli\)"
+        return
+    }
+    if ($lines -notcontains "15") {
+        skip "47 capi_parity (no DuckDB 1.5.x CLI: the corpus compares every line against the 1.5.x output, so 1.5.x is the reference line)"
+        return
+    }
+    $dist = Split-Path -Parent $script:EXT
+    if (-not $dist -or -not (Test-Path -LiteralPath $dist)) { skip "47 capi_parity (no extension resolved)"; return }
+    $vars = @{
+        CAPI_LINES = ($lines -join ",")
+        CAPI_DIST = $dist
+        FSQL_CC = $script:CC
+        PYTHONIOENCODING = "utf-8"
+        PYTHONUTF8 = "1"
+    }
+    foreach ($l in $lines) { $vars["FSQL_DUCKDB_" + $l] = (capi_cli_for $l) }
+    $r = capi_py_run_env "parity_diff.py" $vars
+    $np = ([regex]::Matches($r.out, '(?m)^\s*PASS\b')).Count
+    $nf = ([regex]::Matches($r.out, '(?m)^\s*FAIL\b')).Count
+    if ($r.rc -eq 0 -and $nf -eq 0) {
+        $skipNote = ""
+        if ($r.out -match '(?m)^\s*SKIP\b') { $skipNote = ", some cases skipped" }
+        pass ("47 capi_parity: $np corpus cases passed across the DuckDB " + ($lines -join "/") + " lines" + $skipNote)
+    }
+    else {
+        $bad = @($r.out -split "`n" | Where-Object { $_ -match '^\s*FAIL' } | Select-Object -First 6)
+        fail ("47 capi_parity: " + $nf + " failing case(s) (exit " + $r.rc + "): " + ($bad -join ' | '))
+    }
+}
+
+# 48 capi_sanitize: the same parity corpus against the INSTRUMENTED extension, on the instrumented
+# CLI. MSVC's /fsanitize=address and clang-cl's /fsanitize=undefined link the runtime into the
+# binary, so there is nothing to preload: the cell's own CLI is the instrumented one, and any
+# report it prints fails the case.
+#
+# Only in a sanitizer cell (-Asan / -Ubsan). Mirrors build_test.sh's gate 48.
+function gate_48 {
+    if (-not $script:SAN) { skip "48 capi_sanitize (a sanitizer cell only: run with -Asan or -Ubsan)"; return }
+    if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\parity_diff.py"))) { skip "48 capi_sanitize (no test\parity_diff.py)"; return }
+    if (-not $script:PYANY) { skip "48 capi_sanitize (no python interpreter: set FSQL_PYTHON_ANY)"; return }
+    if (-not $script:CC) { skip "48 capi_sanitize (no gcc-style compiler for the mock plugins: set FSQL_CC)"; return }
+    $cli = resolve_san_cli
+    if (-not $cli) { skip "48 capi_sanitize (no instrumented CLI under " + (sanitize_out_dir $script:SAN) + ")"; return }
+    $ext = resolve_san_ext
+    if (-not $ext) { skip "48 capi_sanitize (no instrumented extension under " + (sanitize_out_dir $script:SAN) + ")"; return }
+    # The harness names the sanitizers the POSIX way ("address" / "undefined");
+    # the Windows cells name their modes after the compiler flag ("asan" /
+    # "ubsan"), so the name is mapped rather than passed through.
+    $sanName = "undefined"
+    if ($script:SAN -eq "asan") { $sanName = "address" }
+    # The corpus is 800-odd statements and every case costs a fresh CLI
+    # start, which under MSVC's AddressSanitizer is seconds each: the whole
+    # corpus took 975s on the Windows cell, which is too long for a CI job.
+    # The sanitizer run therefore covers the files whose cases drive the
+    # engine's C the hardest (the vector maths, the analytics, the config
+    # keys, the ledger, the morphology and the domain agents); the WHOLE
+    # corpus is covered by gate 47, which runs it uninstrumented, and by the
+    # POSIX harness's own gate 48, which runs all of it under ASan+UBSan.
+    $files = "vector.sql,analytics.sql,config.sql,ledger.sql,morphology.sql,domain_agents.sql"
+    $vars = @{
+        CAPI_SAN = $sanName
+        CAPI_LINES = "15"
+        CAPI_PARITY_FILES = $files
+        CAPI_DIST = (Split-Path -Parent $ext)
+        FSQL_DUCKDB_15 = $cli
+        FSQL_CC = $script:CC
+        PYTHONIOENCODING = "utf-8"
+        PYTHONUTF8 = "1"
+        FSQL_HARNESS_SAN_FACTOR = "10"
+    }
+    $r = capi_py_run_env "parity_diff.py" $vars
+    $np = ([regex]::Matches($r.out, '(?m)^\s*PASS\b')).Count
+    $nf = ([regex]::Matches($r.out, '(?m)^\s*FAIL\b')).Count
+    if ($r.rc -eq 0 -and $nf -eq 0) {
+        pass ("48 capi_sanitize: $np corpus cases passed under the instrumented extension (" + $script:SAN + ", over $files), with no sanitizer report")
+    }
+    else {
+        $bad = @($r.out -split "`n" | Where-Object { $_ -match '^\s*FAIL|Sanitizer|runtime error' } | Select-Object -First 6)
+        fail ("48 capi_sanitize: " + $nf + " failing case(s) under " + $script:SAN + " (exit " + $r.rc + "): " + ($bad -join ' | '))
+    }
+}
+
+# 49 capi_lifecycle: can a file database that has the extension loaded be closed and reopened like
+# any other? The extension keeps connections to run SQL on the caller's database, and a live
+# connection keeps the host's database instance alive; a host-departure monitor releases them when
+# every client connection has closed.
+#
+# What this Windows gate asserts, at the level the host lets it: with the extension loaded on a
+# file database, the session ends cleanly, the shutdown checkpoint ran (no .wal is left behind),
+# the file reopens in a fresh process and reads its rows back, the extension still answers after
+# the reopen, and the same holds after an explicit fractal_release().
+#
+# What it does NOT carry over: build_test.sh's gate 49 also measures, from inside the harness
+# process, that the process holds no descriptor on the database afterwards and leaves no thread
+# behind (that gate's C harness reads /proc/self/fd and /proc/self/task). Windows states those two
+# facts differently (handle count and thread count, not /proc), so the C harness has to be ported
+# before they can be asserted here; this gate covers the file-level half of the claim.
+#
+# The checkpoint is asserted on a session that RELEASES the extension's connections explicitly.
+# An unreleased session leaves its .wal behind: the extension keeps a connection of its own to the
+# caller's database, and the host-departure monitor that releases it runs after the last client
+# connection has closed -- which is after the process is gone. The next session replays that WAL,
+# and a released session checkpoints it away.
+function gate_49 {
+    if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\parity\lifecycle.sql"))) { skip "49 capi_lifecycle (no test\parity\lifecycle.sql)"; return }
+    $cli = capi_cli_for "15"
+    if (-not $cli) { $cli = $script:DUCK }
+    if (-not $cli -or -not (Test-Path -LiteralPath $cli)) { skip "49 capi_lifecycle (no DuckDB CLI)"; return }
+    $ext = $script:EXT
+    if (-not $ext -or -not (Test-Path -LiteralPath $ext)) { skip "49 capi_lifecycle (no extension resolved)"; return }
+    $W = Join-Path $env:TEMP "fractalsql_bt_lifecycle"
+    Remove-Item -Recurse -Force $W -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Path $W | Out-Null
+    $db = Join-Path $W "lifecycle.db"
+    $extPath = $ext -replace '\\', '/'
+    $bad = 0; $firstBad = ""
+    # 1. the session with the extension loaded ends cleanly, and the rows are there.
+    $out = (& $cli -unsigned -c "LOAD '$extPath'; CREATE TABLE t (i INTEGER); INSERT INTO t VALUES (1),(2),(3); SELECT count(*) FROM t;" $db 2>&1 | plain_lines | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $out -notmatch '3') {
+        $bad++; if (-not $firstBad) { $firstBad = "the session with the extension loaded did not end cleanly: $out" }
+    }
+    # 2. the file reopens in a fresh process, reads its rows back, and the extension
+    #    answers. (The .wal this session leaves is NOT a failure: the extension keeps
+    #    a connection of its own to the caller's database, and the host-departure
+    #    monitor releases it after the last client connection has closed -- which is
+    #    after this process is gone. The next session replays that WAL, which is
+    #    exactly what the rows reading back proves.)
+    $out2 = (& $cli -unsigned -c "LOAD '$extPath'; SELECT count(*) FROM t; SELECT fractal_version();" $db 2>&1 | plain_lines | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $out2 -notmatch '3' -or $out2 -notmatch '\d+\.\d+\.\d+') {
+        $bad++; if (-not $firstBad) { $firstBad = "the database did not reopen with its rows and the extension answering: $out2" }
+    }
+    # 3. a session that releases the extension's connections explicitly closes
+    #    cleanly: the shutdown checkpoint ran, so no .wal is left beside the file.
+    $out3 = (& $cli -unsigned -c "LOAD '$extPath'; SELECT fractal_release(); SELECT count(*) FROM t;" $db 2>&1 | plain_lines | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $out3 -notmatch '3') {
+        $bad++; if (-not $firstBad) { $firstBad = "a released session did not close cleanly: $out3" }
+    }
+    if (Test-Path -LiteralPath "$db.wal") {
+        $bad++; if (-not $firstBad) { $firstBad = "a .wal file was left beside the database after a released session" }
+    }
+    if ($bad -eq 0) { Pass "49 capi_lifecycle: a file database with the extension loaded reopens with its rows, and a released session checkpoints (no .wal)" }
+    else { Fail "49 capi_lifecycle: $bad problem(s), first: $firstBad" }
+    Remove-Item -Recurse -Force $W -ErrorAction SilentlyContinue
+}
+
+# 51 capi_lifecycle_san: gate 49's file-level claim under a sanitizer. Only in a sanitizer cell
+# (-Asan / -Ubsan), where the instrumented CLI hosts the instrumented extension.
+function gate_51 {
+    if (-not $script:SAN) { skip "51 capi_lifecycle_san (a sanitizer cell only: run with -Asan or -Ubsan)"; return }
+    $cli = resolve_san_cli
+    if (-not $cli) { skip "51 capi_lifecycle_san (no instrumented CLI under " + (sanitize_out_dir $script:SAN) + ")"; return }
+    $ext = resolve_san_ext
+    if (-not $ext) { skip "51 capi_lifecycle_san (no instrumented extension under " + (sanitize_out_dir $script:SAN) + ")"; return }
+    $W = Join-Path $env:TEMP "fractalsql_bt_lifecycle_san"
+    Remove-Item -Recurse -Force $W -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Path $W | Out-Null
+    $db = Join-Path $W "lifecycle.db"
+    $extPath = $ext -replace '\\', '/'
+    $bad = 0; $firstBad = ""
+    $out = (& $cli -unsigned -c "LOAD '$extPath'; CREATE TABLE t (i INTEGER); INSERT INTO t VALUES (1),(2),(3); SELECT count(*) FROM t;" $db 2>&1 | plain_lines | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $out -notmatch '3') {
+        $bad++; if (-not $firstBad) { $firstBad = "the instrumented session did not end cleanly: $out" }
+    }
+    if ($out -match 'Sanitizer|runtime error') {
+        $bad++; if (-not $firstBad) { $firstBad = "the instrumented session printed a sanitizer report" }
+    }
+    $out2 = (& $cli -unsigned -c "LOAD '$extPath'; SELECT count(*) FROM t; SELECT fractal_version();" $db 2>&1 | plain_lines | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $out2 -notmatch '3') {
+        $bad++; if (-not $firstBad) { $firstBad = "the database did not reopen with its rows: $out2" }
+    }
+    if ($out2 -match 'Sanitizer|runtime error') {
+        $bad++; if (-not $firstBad) { $firstBad = "the reopen printed a sanitizer report" }
+    }
+    # The checkpoint is asserted on a RELEASED session (see gate 49): the
+    # extension's own connection to the caller's database outlives an
+    # unreleased session's process, so the WAL is still there then.
+    $out3 = (& $cli -unsigned -c "LOAD '$extPath'; SELECT fractal_release(); SELECT count(*) FROM t;" $db 2>&1 | plain_lines | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $out3 -notmatch '3') {
+        $bad++; if (-not $firstBad) { $firstBad = "the released instrumented session did not close cleanly: $out3" }
+    }
+    if ($out3 -match 'Sanitizer|runtime error') {
+        $bad++; if (-not $firstBad) { $firstBad = "the released session printed a sanitizer report" }
+    }
+    if (Test-Path -LiteralPath "$db.wal") {
+        $bad++; if (-not $firstBad) { $firstBad = "a .wal file was left beside the database after a released session" }
+    }
+    if ($bad -eq 0) { Pass "51 capi_lifecycle_san: the file-level lifecycle claim holds under the instrumented extension (" + $script:SAN + "), with no sanitizer report" }
+    else { Fail "51 capi_lifecycle_san: $bad problem(s), first: $firstBad" }
+    Remove-Item -Recurse -Force $W -ErrorAction SilentlyContinue
+}
+
+# Runs one of the python test drivers with an explicit environment (the
+# parity corpus needs several DuckDB lines and its own CAPI_DIST, which
+# capi_py_run's single-line environment cannot express).
+function capi_py_run_env {
+  param([string]$script_name, [hashtable]$vars)
+  $old = @{}
+  foreach ($k in $vars.Keys) {
+    $old[$k] = [Environment]::GetEnvironmentVariable($k, "Process")
+    [Environment]::SetEnvironmentVariable($k, $vars[$k], "Process")
+  }
   try {
     $out = (& $script:PYANY -I (Join-Path $script:HERE ("test\" + $script_name)) 2>&1 | plain_lines | Out-String -Width 8192)
     $rc = $LASTEXITCODE
@@ -4262,6 +4634,20 @@ function gate_53 {
   } else {
     ($r.out -split "`n" | Where-Object { $_ -match 'FAIL|crash|INTERNAL' } | Select-Object -First 10) | ForEach-Object { [Console]::Error.WriteLine("    " + $_) }
     fail ("53 capi_edge: a function sweep crashed or reported INTERNAL (run test\edge_inputs.py)")
+  }
+}
+
+# test\audit_regress.py: the security regressions reachable from SQL (plugin path bound, unreadable .sig, vectorizer arity).
+function gate_59 {
+  if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\audit_regress.py"))) { skip "59 audit_regress (no test\audit_regress.py)"; return }
+  if (-not (capi_py_ready "59" "audit_regress")) { return }
+  $r = capi_py_run "audit_regress.py"
+  $line = ($r.out -split "`n" | Where-Object { $_ -match '^audit_regress: ' } | Select-Object -Last 1)
+  if ($r.rc -eq 0 -and $line) {
+    pass ("59 audit_regress: " + ($line -replace '^audit_regress: ', '').Trim())
+  } else {
+    ($r.out -split "`n" | Where-Object { $_ -match '^  FAIL' } | Select-Object -First 10) | ForEach-Object { [Console]::Error.WriteLine("    " + $_) }
+    fail ("59 audit_regress: " + $(if ($line) { $line.Trim() } else { "the driver did not finish" }) + " (run test\audit_regress.py)")
   }
 }
 
@@ -4320,8 +4706,8 @@ function gate_55 {
   }
 }
 
-function gate_56 { skip "56 capi_oom (the allocation-failure sweep interposes the allocator with LD_PRELOAD: Linux only)" }
-function gate_57 { skip "57 capi_oom_full (the allocation-failure sweep interposes the allocator with LD_PRELOAD: Linux only)" }
+function gate_56 { skip "56 capi_oom (not run on Windows: the allocation-failure sweep replaces the memory allocator with LD_PRELOAD, which is Linux only)" }
+function gate_57 { skip "57 capi_oom_full (not run on Windows: the allocation-failure sweep replaces the memory allocator with LD_PRELOAD, which is Linux only)" }
 
 function gate_title {
   param([string]$n, [string]$name)
@@ -4378,15 +4764,287 @@ function gate_name {
     "44" { return "shipped_http_plugin" }
     "45" { return "mcp_conformance" }
     "46" { return "capi_matrix" }
-    "47" { return "fuzz_parse" }
+    "47" { return "capi_parity" }
+    "48" { return "capi_sanitize" }
+    "49" { return "capi_lifecycle" }
+    "51" { return "capi_lifecycle_san" }
+    "52" { return "fuzz_parse" }
     "53" { return "capi_edge" }
     "54" { return "error_table" }
     "55" { return "ledger_integrity" }
     "56" { return "capi_oom" }
     "57" { return "capi_oom_full" }
     "58" { return "mcp_audit_http" }
+    "59" { return "audit_regress" }
+    "60" { return "precision" }
+    "61" { return "index" }
+    "62" { return "lakehouse" }
+    "63" { return "enterprise_core" }
+    "64" { return "unicode" }
+    "65" { return "partial_reasoning" }
+    "66" { return "id_emission" }
+    "67" { return "rename" }
+    "68" { return "ledger_env" }
+    "69" { return "redact_unit" }
+    "70" { return "ledger_payloads" }
+    "71" { return "kit_mutation" }
+    "72" { return "scripted_replies" }
   }
   return ""
+}
+
+# test\test_precision.py: the precision contract (R2, R3, R5, R7, R8) -- the rename, the ONE cosine, the double
+# accumulation and the build flags.
+function gate_60 {
+  if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\test_precision.py"))) { skip "60 precision (no test\test_precision.py)"; return }
+  if (-not (capi_py_ready "60" "precision")) { return }
+  $r = capi_py_run "test_precision.py"
+  $line = ($r.out -split "`n" | Where-Object { $_ -match '^precision: ' } | Select-Object -Last 1)
+  if ($r.rc -eq 0 -and $line) {
+    pass ("60 precision: " + ($line -replace '^precision: ', '').Trim())
+  } else {
+    ($r.out -split "`n" | Where-Object { $_ -match '^  FAIL' } | Select-Object -First 20) | ForEach-Object { [Console]::Error.WriteLine("    " + $_) }
+    fail ("60 precision: " + $(if ($line) { $line.Trim() } else { "the checks did not finish" }) + " (run test\test_precision.py)")
+  }
+}
+
+# test\test_index.py: the native IVF index -- the SQL surface, the exact verified distances, the delta, and the proof
+# that the index was ACTUALLY USED (the rows it scanned are far below the table's row count).
+function gate_61 {
+  if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\test_index.py"))) { skip "61 index (no test\test_index.py)"; return }
+  if (-not (capi_py_ready "61" "index")) { return }
+  $r = capi_py_run "test_index.py"
+  if ($r.out -match '(?m)^index: SKIPPED -- (.*)$') {
+    skip ("61 index: " + $Matches[1].Trim())
+    return
+  }
+  $line = ($r.out -split "`n" | Where-Object { $_ -match '^index: ' } | Select-Object -Last 1)
+  if ($r.rc -eq 0 -and $line) {
+    pass ("61 index: " + ($line -replace '^index: ', '').Trim())
+  } else {
+    ($r.out -split "`n" | Where-Object { $_ -match '^  FAIL' } | Select-Object -First 20) | ForEach-Object { [Console]::Error.WriteLine("    " + $_) }
+    fail ("61 index: " + $(if ($line) { $line.Trim() } else { "the checks did not finish" }) + " (run test\test_index.py)")
+  }
+}
+
+# test\test_enterprise_core.py: the extension with an enterprise core library: the REAL one when FSQL_TEST_ENTERPRISE_LIB names it, otherwise
+# the mock core. The Pareto and signature checks need the real library and run only with it.
+function gate_63 {
+  if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\test_enterprise_core.py"))) { skip "63 enterprise_core (no test\test_enterprise_core.py)"; return }
+  if (-not (capi_py_ready "63" "enterprise_core")) { return }
+  $r = capi_py_run "test_enterprise_core.py"
+  $line = ($r.out -split "`n" | Where-Object { $_ -match '^enterprise core: ' } | Select-Object -Last 1)
+  if ($r.rc -eq 0 -and $line) {
+    pass ("63 enterprise_core: " + ($line -replace '^enterprise core: ', '').Trim())
+  } else {
+    ($r.out -split "`n" | Where-Object { $_ -match '^  FAIL' } | Select-Object -First 20) | ForEach-Object { [Console]::Error.WriteLine("    " + $_) }
+    fail ("63 enterprise_core: " + $(if ($line) { $line.Trim() } else { "the checks did not finish" }) + " (run test\test_enterprise_core.py)")
+  }
+}
+
+# 64 unicode: test\test_unicode.py -- accented Latin, CJK, right-to-left text, emoji and combining marks through fractal_chunk_text and a table
+# round trip: one chunk is the whole text, offsets are character offsets, the chunks join back, the JSON is strict UTF-8.
+function gate_64 {
+  if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\test_unicode.py"))) { skip "64 unicode (no test\test_unicode.py)"; return }
+  if (-not (capi_py_ready "64" "unicode")) { return }
+  $r = capi_py_run "test_unicode.py"
+  $line = ($r.out -split "`n" | Where-Object { $_ -match '^unicode: ' } | Select-Object -Last 1)
+  if ($r.rc -eq 0 -and $line) {
+    pass ("64 unicode: " + ($line -replace '^unicode: ', '').Trim())
+  } else {
+    ($r.out -split "`n" | Where-Object { $_ -match '^  FAIL' } | Select-Object -First 20) | ForEach-Object { [Console]::Error.WriteLine("    " + $_) }
+    fail ("64 unicode: " + $(if ($line) { $line.Trim() } else { "the checks did not finish" }) + " (run test\test_unicode.py)")
+  }
+}
+
+# 65 partial_reasoning: test\test_partial_reasoning.py -- agent_partial_reasoning_fail. Off (the default) an agent raises when its reasoning step
+# fails; on, search_agent / rag_agent and the domain agents keep their computed half and report reasoning_step_failed. A local HTTP stub answers
+# embeddings and fails every chat call, through the vendored http plugin.
+function gate_65 {
+  if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\test_partial_reasoning.py"))) { skip "65 partial_reasoning (no test\test_partial_reasoning.py)"; return }
+  if (-not (capi_py_ready "65" "partial_reasoning")) { return }
+  $r = capi_py_run "test_partial_reasoning.py"
+  $skipLine = ($r.out -split "`n" | Where-Object { $_ -match '^  SKIP' } | Select-Object -First 1)
+  if ($skipLine) { skip ("65 partial_reasoning: " + ($skipLine -replace '^  SKIP ', '').Trim()); return }
+  $line = ($r.out -split "`n" | Where-Object { $_ -match '^failed: ' } | Select-Object -Last 1)
+  if ($r.rc -eq 0 -and $line -and $line.Trim() -eq "failed: 0") {
+    pass ("65 partial_reasoning: " + (($r.out -split "`n" | Where-Object { $_ -match '^ok' }).Count) + " checks (rag_agent and a domain agent raise by default and keep their computed half with the key on)")
+  } else {
+    ($r.out -split "`n" | Where-Object { $_ -match '^FAIL' } | Select-Object -First 20) | ForEach-Object { [Console]::Error.WriteLine("    " + $_) }
+    fail ("65 partial_reasoning: " + $(if ($line) { $line.Trim() } else { "the checks did not finish" }) + " (run test\test_partial_reasoning.py)")
+  }
+}
+
+# 70 ledger_payloads: what fractal_audit_log writes into the chain for every shape of entry type, payload and actor
+# (test\ledger_payloads.py): the caller's text never breaks the JSON or the chain.
+function gate_70 {
+  if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\ledger_payloads.py"))) { skip "70 ledger_payloads (no test\ledger_payloads.py)"; return }
+  if (-not (capi_py_ready "70" "ledger_payloads")) { return }
+  $r = capi_py_run "ledger_payloads.py"
+  $line = ($r.out -split "`n" | Where-Object { $_ -match '^ledger_payloads: ' } | Select-Object -Last 1)
+  if ($r.rc -eq 0 -and $line) {
+    pass ("70 ledger_payloads: " + ($line -replace '^ledger_payloads: ', '').Trim())
+  } else {
+    ($r.out -split "`n" | Where-Object { $_ -match '^  FAIL' } | Select-Object -First 20) | ForEach-Object { [Console]::Error.WriteLine("    $_") }
+    fail ("70 ledger_payloads: " + $(if ($line) { $line.Trim() } else { "the checks did not finish" }) + " (run test\ledger_payloads.py)")
+  }
+}
+
+# 72 kit_mutation: the demo kits' own statements, with one literal argument replaced at a time by an awkward value; nothing may crash.
+function gate_71 {
+  if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\kit_mutation.py"))) { skip "71 kit_mutation (no test\kit_mutation.py)"; return }
+  if (-not $script:Py) { skip "71 kit_mutation (no python on PATH)"; return }
+  # capi_py_run is the helper the other C-API gates use: it points the driver at
+  # the resolved extension (CAPI_DIST), at the CLI under test, and at the mock
+  # reasoning plugin, and it restores the environment afterwards. Calling the
+  # driver directly left it guessing a POSIX path, which is wrong here.
+  if (-not (capi_py_ready "71" "kit_mutation")) { return }
+  $r = capi_py_run "kit_mutation.py"
+  $line = ($r.out -split "`n" | Where-Object { $_ -match '^kit mutation: ' } | Select-Object -Last 1)
+  if ($r.rc -eq 0 -and $line) { Pass ("71 kit_mutation: " + ($line -replace '^kit mutation: ', '').Trim() + " (every kit statement with an awkward argument: no crash)") }
+  else {
+    ($r.out -split "`n" | Where-Object { $_ -match 'FAIL|Traceback|Error' } | Select-Object -First 20) | ForEach-Object { [Console]::Error.WriteLine("    $_") }
+    Fail '71 kit_mutation: see the output above'
+  }
+}
+
+# 73 scripted_replies: the extension against a model that answers exactly what the test scripts.
+function gate_72 {
+  if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\scripted_replies.py"))) { skip "72 scripted_replies (no test\scripted_replies.py)"; return }
+  if (-not $script:Py) { skip "72 scripted_replies (no python on PATH)"; return }
+  # The same helper as gate 71: the driver needs the resolved extension, the CLI
+  # under test and the mock reasoning plugin, and it must not be left guessing
+  # POSIX paths.
+  if (-not (capi_py_ready "72" "scripted_replies")) { return }
+  $r = capi_py_run "scripted_replies.py"
+  $line = ($r.out -split "`n" | Where-Object { $_ -match '^scripted_replies: ' } | Select-Object -Last 1)
+  if ($r.rc -eq 0 -and $line) { Pass ("72 scripted_replies: " + ($line -replace '^scripted_replies: ', '').Trim() + " (the model answers exactly what the test scripts)") }
+  else {
+    ($r.out -split "`n" | Where-Object { $_ -match 'FAIL|Traceback|Error' } | Select-Object -First 20) | ForEach-Object { [Console]::Error.WriteLine("    $_") }
+    Fail '72 scripted_replies: see the output above'
+  }
+}
+
+# 68 rename: the two-argument fractal_search was renamed fractal_sfs_converge. The old names are refused, and the refusal names the new
+# one: there are no aliases.
+function gate_67 {
+  $r = sqlq_env "SELECT fractal_search([1.0,0.1]::DOUBLE[], [1.0,0.1]::DOUBLE[]);"
+  if ($r -match 'renamed fractal_sfs_converge') {
+    pass '67 rename: fractal_search(vector, query) is refused and the refusal names fractal_sfs_converge'
+  }
+  else {
+    fail "67 rename: fractal_search(vector, query) was not refused: $r"
+  }
+  $r = sqlq_env "SELECT fractal_sfs_converge([1.0,0.1]::DOUBLE[], [1.0,0.1]::DOUBLE[]);"
+  if ($r -notmatch '(?m)^[A-Za-z ]*Error: ') {
+    pass '67 rename: fractal_sfs_converge(vector, query) answers'
+  }
+  else { fail "67 rename: fractal_sfs_converge: $r" }
+}
+
+# 69 ledger_env: the ledger's environment configuration. The retention mode is read from the environment, and a value that is neither
+# fade nor exact is refused.
+function gate_68 {
+  $r = sqlq_env "SELECT fractal_config_set('ledger_retention','exact');"
+  if ($r -notmatch '(?m)^[A-Za-z ]*Error: ') { pass '68 ledger_env: the exact retention mode is accepted' }
+  else { fail "68 ledger_env: the exact retention mode was refused: $r" }
+  $r = sqlq_env "SELECT fractal_config_set('ledger_retention','sometimes');"
+  if ($r -match 'must be one of') { pass '68 ledger_env: a retention mode that is neither fade nor exact is refused' }
+  else { fail "68 ledger_env: a bad retention mode was not refused: $r" }
+}
+
+# 70 redact_unit: the audit-redaction header at the storage seam (test\redact_unit.c): the hash and truncate modes, the buffer limits and
+# every JSON-special character.
+function gate_69 {
+  if (-not $script:Cc) { skip '69 redact_unit (no C compiler)'; return }
+  $src = Join-Path $script:HERE 'test\redact_unit.c'
+  if (-not (Test-Path -LiteralPath $src)) { skip '69 redact_unit (no test\redact_unit.c)'; return }
+  # Its own work directory: the gate must stand alone, whatever ran before it.
+  $work = Join-Path $env:TEMP ("fractalsql_bt_redact_unit_" + [guid]::NewGuid().ToString('N'))
+  $null = New-Item -ItemType Directory -Path $work -Force
+  $bin = Join-Path $work 'redact_unit.exe'
+  # One step, compile and link together, the way this runner builds its
+  # fixture plugins: a separate link step leaves an object that the driver
+  # may not be able to link on its own.
+  # The test drives the redaction by setting and clearing an environment variable,
+  # and neither MSVC's CRT nor mingw's has setenv/unsetenv: the small POSIX shim
+  # is force-included, so the test source stays portable.
+  $shim = Join-Path $script:HERE 'tests\windows\win_env_compat.h'
+  $out = & $script:Cc -std=c11 -O1 -g -Wno-unused-function "-I$($script:HERE)\src" "-include" $shim $src -o $bin 2>&1
+  if ($LASTEXITCODE -ne 0) { fail "69 redact_unit: the unit test did not build: $out"; Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue; return }
+  $out = & $bin 2>&1 | Out-String
+  if ($LASTEXITCODE -eq 0) { pass ("69 redact_unit: " + (($out -split "`n" | Where-Object { $_ -match 'checks passed' } | Select-Object -Last 1)).Trim()) }
+  else { ($out -split "`n" | Select-Object -Last 12) | ForEach-Object { Write-Host "    $_" }; fail '69 redact_unit: see the output above' }
+  Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# 66 id_emission: how the domain agents write a row's id into their JSON result (test\id_emission.py). The id column is the caller's
+# data, so what an agent writes must never become JSON structure and must never be altered.
+function gate_66 {
+  if (-not (Test-Path -LiteralPath (Join-Path $script:HERE "test\id_emission.py"))) { skip "66 id_emission (no test\id_emission.py)"; return }
+  if (-not (capi_py_ready "66" "id_emission")) { return }
+  $r = capi_py_run "id_emission.py"
+  $line = ($r.out -split "`n" | Where-Object { $_ -match '^id_emission: ' } | Select-Object -Last 1)
+  if ($r.rc -eq 0 -and $line) {
+    pass ("66 id_emission: " + ($line -replace '^id_emission: ', '').Trim())
+  } else {
+    ($r.out -split "`n" | Where-Object { $_ -match '^  FAIL' } | Select-Object -First 20) | ForEach-Object { [Console]::Error.WriteLine("    $_") }
+    fail ("66 id_emission: " + $(if ($line) { $line.Trim() } else { "the checks did not finish" }) + " (run test\id_emission.py)")
+  }
+}
+
+# 62 lakehouse: demo-lakehouse-ducklake.sql and demo-lakehouse-iceberg.sql run start to finish against the fixtures this gate writes
+# under a private LAKE_DIR. Skips, naming what is missing, when DuckDB cannot download the ducklake / iceberg extensions or python
+# has no pyiceberg + pyarrow + sqlalchemy for the Iceberg writer.
+function gate_62 {
+  $lake = Join-Path ([IO.Path]::GetTempPath()) ("fsql_lake_" + [guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Force -Path (Join-Path $lake "ducklake") | Out-Null
+  $envLake = "LAKE_DIR=" + ($lake -replace '\\', '/')
+  # The first element needs its own parentheses: in PowerShell the comma operator binds
+  # tighter than +, so without them the whole list would collapse into one string
+  # ("NAME=" + @(...)) and the whole environment would be set as ONE variable with a
+  # name that contains spaces -- which is why LAKE_DIR never reached the CLI.
+  $mockEnv = @(("FRACTALSQL_REASONING_PLUGIN=" + (pj "mock_reasoning_plugin")), "FSQL_REASONING_HTTP_EMBED_URL=https://mock.invalid/v1/embeddings",
+               "FSQL_REASONING_HTTP_EMBED_MODEL=mock-embed", "FSQL_MOCK_EMBED_DIM=768", $envLake)
+  $demos = Join-Path $script:HERE "demo"
+  # DuckLake
+  $r = sqlq_env -EnvPairs @($envLake) (Get-Content -Raw (Join-Path $demos "lakehouse\make_ducklake_fixture.sql"))
+  if ($script:SQLQ_RC -ne 0) {
+    skip ("62 lakehouse: the DuckLake fixture could not be written (DuckDB downloads the ducklake extension): " + ([string]$r).Substring(0, [Math]::Min(120, ([string]$r).Length)))
+  } else {
+    $r = [string](sqlq_env -EnvPairs $mockEnv (Get-Content -Raw (Join-Path $demos "demo-lakehouse-ducklake.sql")))
+    if ($script:SQLQ_RC -eq 0 -and $r -notmatch '(?m)^[A-Za-z ]*Error: ' -and $r.Contains('"intercepted":true') -and $r.Contains('"intercepted":false')) {
+      pass "62 lakehouse: demo-lakehouse-ducklake.sql reads the DuckLake table and its screen intercepts the outage state and lets the healthy one through"
+    } else {
+      ($r -split "`n" | Where-Object { $_ -match 'Error' } | Select-Object -First 10) | ForEach-Object { [Console]::Error.WriteLine("    " + $_) }
+      fail "62 lakehouse: demo-lakehouse-ducklake.sql"
+    }
+  }
+  # Iceberg
+  $py = Get-Command python3 -ErrorAction SilentlyContinue; if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+  $have = $false
+  if ($py) { & $py.Source -c "import pyiceberg, pyarrow, sqlalchemy" 2>$null; $have = ($LASTEXITCODE -eq 0) }
+  if (-not $have) {
+    skip "62 lakehouse: the Iceberg demo needs python with pyiceberg, pyarrow and sqlalchemy for its fixture writer"
+  } else {
+    $env:LAKE_DIR = ($lake -replace '\\', '/')
+    $w = & $py.Source (Join-Path $demos "lakehouse\make_iceberg_fixture.py") 2>&1
+    if ($LASTEXITCODE -ne 0) { fail ("62 lakehouse: the Iceberg fixture writer failed: " + ([string]$w)) }
+    else {
+      $r = [string](sqlq_env -EnvPairs $mockEnv (Get-Content -Raw (Join-Path $demos "demo-lakehouse-iceberg.sql")))
+      if ($script:SQLQ_RC -eq 0 -and $r -notmatch '(?m)^[A-Za-z ]*Error: ' -and $r.Contains('"intercepted":true') -and $r.Contains('"intercepted":false')) {
+        pass "62 lakehouse: demo-lakehouse-iceberg.sql reads the Iceberg table and its screen intercepts the outage state and lets the healthy one through"
+      } else { fail "62 lakehouse: demo-lakehouse-iceberg.sql" }
+    }
+    Remove-Item Env:LAKE_DIR -ErrorAction SilentlyContinue
+  }
+  # The fixture and the demo write their ATTACH statement into a file in the working
+  # directory (the CLI's .output takes a literal name). They are transient: the gate
+  # takes them away again so a run leaves no litter in the tree.
+  foreach ($f in @("lake_attach.sql", "lakehouse_attach.sql")) {
+    Remove-Item -LiteralPath (Join-Path $script:HERE $f) -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Item -Recurse -Force $lake -ErrorAction SilentlyContinue
 }
 
 function gate_body {
@@ -4439,12 +5097,30 @@ function gate_body {
     "45" { gate_45 }
     "46" { gate_46 }
     "47" { gate_47 }
+    "48" { gate_48 }
+    "49" { gate_49 }
+    "51" { gate_51 }
+    "52" { gate_52 }
     "53" { gate_53 }
     "54" { gate_54 }
     "55" { gate_55 }
     "56" { gate_56 }
     "57" { gate_57 }
     "58" { gate_58 }
+    "59" { gate_59 }
+    "60" { gate_60 }
+    "61" { gate_61 }
+    "62" { gate_62 }
+    "63" { gate_63 }
+    "64" { gate_64 }
+    "65" { gate_65 }
+    "66" { gate_66 }
+    "67" { gate_67 }
+    "68" { gate_68 }
+    "69" { gate_69 }
+    "70" { gate_70 }
+    "71" { gate_71 }
+    "72" { gate_72 }
   }
 }
 
@@ -4500,10 +5176,20 @@ function main {
   }
   if ($script:LIST_ONLY) {
     foreach ($g in @("01","02","03","04","05","06","07","08","09","10","11","12","13","14","15","16","17","18","19","20",
-                     "21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","53","54","55","56","57","58")) {
+                     "21","22","23","24","25","26","27","28","29","30","31","32","33","34","35","36","37","38","39","40","41","42","43","44","45","46","47","48","49","51","52","53","54","55","56","57","58","59","60","61","62","63","64","65")) {
       Write-Output ("  " + $g + "  " + (gate_name $g))
     }
     return
+  }
+
+  # The fixture files under $BTROOT are shared by every run of this host
+  # (and of the hosts that use the same mock plugin), so only one run may
+  # have them at a time. Taken before anything reads or writes them.
+  if (-not (acquire_run_lock)) {
+    $who = lock_holder
+    die ("another build_test run is holding " + $script:LOCKFILE + " -- the fixture files under " + $script:BTROOT +
+         " are shared, so only one run at a time; wait for the other run to finish" +
+         $(if ($who) { " (held by " + $who + ")" } else { "" }))
   }
 
   # Native sanitizer cell: built BEFORE the gates run. A build failure
@@ -4562,10 +5248,10 @@ function main {
   } elseif ($script:MODE -eq "quick") {
     $toRun = @("01", "02")
   } elseif ($script:MODE -eq "fuzz") {
-    $toRun = @("21", "42", "47")
+    $toRun = @("21", "42", "52")
   } else {
     $toRun = @("01","02","03","04","05","06","07","08","09","10","11","12","13","14","15","16","17","18","19","20",
-               "22","23","24","25","26","27","28","29","30","31","32","34","35","36","37","38","39","40","41","43","44","45","46","53","54","55","56","58")
+               "22","23","24","25","26","27","28","29","30","31","32","34","35","36","37","38","39","40","41","43","44","45","46","47","48","49","51","53","54","55","56","58","59","60","61","62","63","64","65","66","67","68","69","70","71","72")
   }
 
   # Every gate except 01 (locate) resolves the artifact itself, so a

@@ -106,7 +106,7 @@ static sig_result check_signature(const char *lib_path, const unsigned char pubk
     FILE *f = fopen(sig_path, "rb");
     if (!f) return SIG_MISSING;
     size_t n = fread(sig, 1, sizeof sig, f);
-    int extra = fgetc(f);                       /* exactly 64 bytes, not "at least" */
+    int extra = ferror(f) ? 0 : fgetc(f);       /* exactly 64 bytes, not "at least"; no fgetc after a read error */
     fclose(f);
     if (n != sizeof sig || extra != EOF) return SIG_INVALID;
 
@@ -226,6 +226,7 @@ const FsqlEnterpriseApi *fsql_enterprise_ensure(void) {
     RESOLVE(h, "fsql_optimize_portfolio_multimodal_pareto", optimize_portfolio_multimodal_pareto);
     /* The two scalar-multimodal entry points are OPTIONAL: a core library that predates one
      * of them still loads, and the caller picks the entry point that matches its arguments. */
+    *(void **)&g_ent.ledger_set_retention             = do_dlsym(h, "fsql_ledger_set_retention");   /* optional: the retention modes */
     *(void **)&g_ent.optimize_portfolio_multimodal    = do_dlsym(h, "fsql_optimize_portfolio_multimodal");
     *(void **)&g_ent.optimize_portfolio_multimodal_ex = do_dlsym(h, "fsql_optimize_portfolio_multimodal_ex");
 

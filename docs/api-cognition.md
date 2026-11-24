@@ -93,7 +93,8 @@ fractal_text_to_sql(question VARCHAR, table_names VARCHAR[]) -> VARCHAR
 
 Returns the validated SQL as plain text. Raises an error if 3 attempts
 (fixed) are exhausted without a validated candidate. Set
-`FRACTALSQL_TEXT_TO_SQL_ALLOWED_STATEMENTS=select_insert_update` to also
+`fractal_config_set('text_to_sql_allowed_statements', 'select_insert_update')` (or
+`FRACTALSQL_TEXT_TO_SQL_ALLOWED_STATEMENTS=select_insert_update` in the environment) to also
 allow `INSERT`/`UPDATE` candidates (default: `SELECT` only) -- `DELETE` and
 DDL/utility statements are rejected in both modes.
 

@@ -84,7 +84,7 @@ Pick by the problem shape, not by the function name.
 | "Rebalance, and compare to the nearest historical allocation?" | `rebalance_sibling` | optimizer + trajectory search → LLM rationale | ✓ |
 | "Give me several distinct good portfolios, not just one?" (enterprise) | `diverse_portfolios` | multimodal optimizer → LLM tradeoff summary | ✓ |
 | "Which sub-agent should handle this incoming task?" | `route_task` | nearest-capability search + budget accounting → LLM rationale | ✓ |
-| "Which node should this workload land on (with vector refinement)?" | `schedule_workload` | `fractal_search` refine + nearest node → LLM rationale | ✓ |
+| "Which node should this workload land on (with vector refinement)?" | `schedule_workload` | `fractal_sfs_converge` refine + nearest node → LLM rationale | ✓ |
 | "Should I block this proposed action (is it near a known-bad state)?" | `outlier_intercept` | distance-to-bad-state safety barrier → LLM justification | ✓ |
 | "Triage a patient against a cohort + baseline→current drift" | `patient_deterioration_triage` | cohort search + trajectory drift → LLM triage | ✓ |
 | "Ask a natural-language question over my tables" | `data_analyst` | NL→SQL→execute → LLM analysis | ✓ |
@@ -247,6 +247,16 @@ stringified) to the named capability id
 (see [id resolution](#a-note-on-id-resolution)). (3) Derives
 `confidence = 1/(1+distance)`, accounts `remaining_budget = budget − cost_per_route`.
 (4) `fractal_reason` writes a one-line routing rationale.
+
+**Searching through an index.** Step (1) scans the table exactly by default. After
+`SELECT fractal_config_set('agent_use_index', 'on')`, and when a
+[`fractal_index`](api-discovery.md) covers `cap_table.cap_emb_col`, it searches through the
+index instead; every distance is still the exact cosine, and rows added after the build are
+scanned exactly. The key is off by default because an index can, rarely, pick a different
+nearest row than the exact scan. With no index on the table and column the agent scans exactly.
+The key takes three values, `off`, `on` and `auto`: with `auto` the agent goes through the index
+only when it is `ready` and the table has at least `agent_index_min_rows` rows (default 10000).
+`fractal_agent_outlier_intercept` (cosine), `fractal_agent_schedule_workload` and `fractal_agent_recall_hybrid` follow the same rule. For `recall_hybrid` the nearest `k` rows come through the index and a `filter_col`/`filter_val` cohort becomes the search's ids set (the index's id column must be the table's key); the rows and distances are the same as the scan returns.
 
 **Returns** one JSON document `{routed_to, confidence, remaining_budget, rationale}`;
 `routed_to` is the named capability id (or null when nothing matched within budget).
@@ -623,7 +633,7 @@ point for that context.
 
 Use it for Sovereign-Edge node scheduling, or any "refine a task vector, then
 find the nearest capable node" workflow. Like [route_task](#route-task--fractal_agent_route_task)
-but with a `fractal_search` refinement step that route_task lacks: the "sniper
+but with a `fractal_sfs_converge` refinement step that route_task lacks: the "sniper
 search" in the abstract search space before the nearest-node lookup.
 
 **Inputs**
@@ -634,8 +644,8 @@ search" in the abstract search space before the nearest-node lookup.
 | `node_table` | `text` | -- | your node/capability table |
 | `node_emb_col` | `text` | -- | the embedding column in that table |
 | `node_id_col` | `text` | -- | the column to return as the node id |
-| `iterations` | `int` | `30` | `fractal_search` refinement iterations |
-| `population` | `int` | `50` | `fractal_search` population size |
+| `iterations` | `int` | `30` | `fractal_sfs_converge` refinement iterations |
+| `population` | `int` | `50` | `fractal_sfs_converge` population size |
 | `k` | `int` | `5` | how many nearest nodes |
 | `context` | `text` | `'{}'` | optional label passed to the reason call |
 
@@ -1109,23 +1119,26 @@ the corpus scan) and fetches the matched rows' non-vector columns as a JSON
 array. That compact, LLM-readable context is what `fractal_reason` consumes.
 (The raw Scout result, by contrast, contains the top-k *embeddings*,
 useless to an LLM and large enough, at `pop_size × dim` floats, to exceed a
-local model's context window and fail the chat call.) `source_doc_ids` are the
-0-based positions of the retrieved rows in the corpus scan.
+local model's context window and fail the chat call.) `source_row_ids` are the rows' real `rowid`s, best first.
 
 ```sql
--- DuckDB table function; no defaults, pass all five args.
-SELECT answer, source_doc_ids, execution_time_ms
+-- DuckDB table function; the five positional arguments are required, meta_filter is a named argument.
+SELECT answer, execution_time_ms, source_row_ids, used_index, context_cut
 FROM fractal_search_agent(
     query       VARCHAR,
     table_name  VARCHAR,
     vector_col  VARCHAR,
     pop_size    INTEGER,
-    iterations  INTEGER
+    iterations  INTEGER,
+    meta_filter := '{"parent_id": 7}'   -- optional
 );
 ```
 - `answer`: The synthesized text response from the LLM.
-- `source_doc_ids`: `LIST(BIGINT)` -- the 0-based positions of the retrieved rows in the corpus scan.
-- `execution_time_ms`: Total pipeline latency, `INTEGER`.
+- `execution_time_ms`: Total pipeline latency, measured, `INTEGER`.
+- `source_row_ids`: `LIST(BIGINT)` -- the retrieved rows' `rowid`s, best first.
+- `used_index`: `BOOLEAN` -- `true` when the nearest rows came from a `fractal_index` (`agent_use_index` on, or auto with a ready index), `false` for the Scout search.
+- `context_cut`: `VARCHAR` (JSON) `{"cells": N, "rows": M}` -- text cells cut to `agent_context_row_bytes` (default 8192 bytes, cut at a character boundary, 0 means no limit, a cut cell carries a marker saying how much was left out) and matched rows left out by the 64-row cap.
+- `meta_filter` is a flat JSON object `{"column": value, ...}`: only rows where every named column equals its value are searched; `null` matches NULL. A filter that is not an object, names a column the table does not have, or matches no row is an error, never ignored. Through an index the matching keys are passed to `fractal_search` as its `ids` option (up to 100000 keys, otherwise the exact scan runs). The table needs an index `id_col` that is an integer key for the index path.
 
 ### `fractal_sql_agent`
 **Self-Correcting SQL Agent**
@@ -1298,9 +1311,8 @@ FROM fractal_rag_agent(
 );
 ```
 
-`meta_filter` is reserved for a future metadata `WHERE` filter; it is
-currently accepted but not yet applied to the search.
-- `answer`: The synthesized text response from the LLM. (This is the function's only output column -- unlike `fractal_search_agent`, it has no `source_doc_ids`/`execution_time_ms`.)
+`meta_filter` is a flat JSON object `{"column": value, ...}` (`'{}'` or an empty string for none) and works as it does for `fractal_search_agent`.
+- `answer`: The synthesized text response from the LLM. Output columns: `answer`, `source_row_ids` (`LIST(BIGINT)`), `used_index` (`BOOLEAN`), `context_cut` (JSON text). The old note follows: unlike `fractal_search_agent`, it has no `source_doc_ids`/`execution_time_ms`.)
 
 ---
 
@@ -1414,3 +1426,15 @@ the same compositions against the built extension through the DuckDB CLI
 and the Python `duckdb` driver, with a mock reasoning canary.
 See [the agents demo](../demo/README.md) and
 [`getting-started.md`](getting-started.md) to get set up first.
+---
+
+## When the reasoning step fails
+
+An agent that composes a data step with a final reasoning call (`fractal_search_agent`, `fractal_rag_agent` and the `fractal_agent_*` domain agents) raises a clear error when the reasoning endpoint fails, by default. A reasoning plugin that was never configured always raises.
+
+Set `fractal_config_set('agent_partial_reasoning_fail', 'on')` to change that. If the reasoning call fails after the data step has already computed, the agent returns its computed half and marks the failure instead of raising:
+
+- the domain agents return their JSON document with `"rationale": null` and a `"reasoning_step_failed"` field carrying the plugin's error text;
+- `fractal_search_agent` and `fractal_rag_agent` return their row (the retrieved row ids, `used_index` and the rest) with `answer` set to `reasoning_step_failed: <error>`.
+
+The setting is `off` by default, and `fractal_reason` and `fractal_text_to_sql` are not covered by it (there the reasoning call is the whole result, so its failure is the error). It is the same setting the SQLite and PostgreSQL hosts have.

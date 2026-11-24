@@ -144,7 +144,7 @@ all tables.
 - **Distinct-Value Sampling**: The current version does not sample
   enum-like columns (e.g., `'Completed'` vs `'completed'`) to help the LLM
   with value normalization.
-- **Table Ranking**: For extremely large schemas, `fractal_search`-based
+- **Table Ranking**: For extremely large schemas, `fractal_sfs_converge`-based
   table subset ranking is planned to replace the current linear
   auto-discovery.
 - **Schema Caps**: `fractal_schema_context`'s explicit `table_names`

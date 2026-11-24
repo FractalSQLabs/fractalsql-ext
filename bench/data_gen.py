@@ -24,7 +24,7 @@ Builds an HNSW index (via DuckDB's `vss` extension) on bench_vectors.emb
 for the HNSW comparison arm of the benchmark. `emb` is a fixed-size
 ARRAY (`FLOAT[d]`) because vss's index only attaches to fixed-size array
 columns; `emb_arr` stays a variable-length LIST (`DOUBLE[]`), the shape
-fractal_search/fractal_search_explore consume.
+fractal_sfs_converge/fractal_search_explore consume.
 
 Usage:
     python3 bench/data_gen.py --db fractalsql_bench.duckdb \\

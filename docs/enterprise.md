@@ -69,13 +69,28 @@ after each flush -- this build doesn't do that for you.
 | `fractal_ledger_flush()` | Encode truth + shadow ledgers into a QTL blob and append it to the chain. |
 | `fractal_ledger_load()` | Hydrate the in-memory ledgers from the chain's latest entry (verifies only the tip, O(1)). |
 | `fractal_ledger_verify()` | **Not enterprise-gated** -- it reads this build's in-memory chain directly, not through the gated library surface. Callable on a community build; walks the ENTIRE in-memory chain (O(n), on demand) and returns the audit report as JSON text (`VARCHAR`). In practice it reports an empty/trivial chain on a community build, since nothing gated (`fractal_ledger_flush`) has written to it. |
-| `fractal_ledger_compact()` | Defragment / re-pack the in-memory QTL representation. |
+| `fractal_ledger_compact()` | Decay every Shadow weight by x0.9 (the ledger's forgetting step; Truth weights are untouched). In `exact` retention it does nothing. |
 | `fractal_ledger_reset_soft()` | Soft-reset ledger counters without dropping history. |
 | `fractal_ledger_reset_hard()` | Hard-reset the ledgers to empty. |
 | `fractal_ledger_truth_count()` | Truth-side entry count (`bigint`). |
 | `fractal_ledger_shadow_count()` | Shadow-side entry count (`bigint`). |
-| `fractal_audit_unpack(blob)` | Decode a persisted QTL blob (`BLOB`) into its audit JSON (`VARCHAR`). |
+| `fractal_audit_unpack(blob)` | Decode a persisted QTL blob (`BLOB`) into its audit JSON (`VARCHAR`). Pass `''` to decode the last blob `fractal_ledger_flush()` sealed on this connection. |
 | `fractal_lock_destructive()` | **Not enterprise-gated.** One-way latch: returns `'locked'`, after which the four destructive functions above (`flush`, `compact`, `reset_soft`, `reset_hard`) refuse on this connection. See below. |
+
+**Retention: fade or exact.** By default the ledger *fades*: compaction decays the Shadow weights, and when a ledger is
+full the lowest-significance entry is evicted to make room. Set `ledger_retention` to `exact` when every recorded entry
+must be kept as it was written:
+
+```sql
+SELECT fractal_config_set('ledger_retention', 'exact');    -- or 'fade' (the default)
+```
+
+In `exact` mode compaction changes nothing and nothing is evicted; a report for a handle that is not yet in a full
+ledger is refused with a "ledger full" error rather than displacing another entry, and a handle that is already
+recorded still accepts more weight. The mode is written into every flushed ledger, so `fractal_ledger_load()` restores
+the mode the ledger was recorded with. Set it before the first report of a connection. `exact` needs an enterprise
+library that supports it: with an older library the first ledger call is refused instead of quietly running the default.
+Like every key, it is process-wide and is also read from the `FRACTALSQL_LEDGER_RETENTION` environment variable.
 
 **Locking the destructive functions.** `fractal_lock_destructive()` is a
 **one-way latch, per connection**: after it returns `'locked'`,

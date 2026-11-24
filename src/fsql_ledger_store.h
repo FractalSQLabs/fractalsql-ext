@@ -51,20 +51,17 @@ typedef struct {
 } ledger_store;
 
 /* Hard ceiling on the in-memory ledger, so a runaway writer cannot exhaust memory. Default 256 MiB; set
- * FSQL_DUCKDB_LEDGER_MAX_BYTES (0 = unlimited). Read once. */
+ * FSQL_DUCKDB_LEDGER_MAX_BYTES, which the config key ledger_max_bytes sets (0 = unlimited). Read on every append, so the key takes
+ * effect at once. */
 static size_t ledger_max_bytes(void) {
-    static int init; static size_t cap;
-    if (!init) {
-        const char *e = getenv("FSQL_DUCKDB_LEDGER_MAX_BYTES");
-        size_t v = (size_t)256 * 1024 * 1024;
-        if (e && *e) {
-            char *end = NULL;
-            unsigned long long x = strtoull(e, &end, 10);
-            if (end && *end == '\0') v = (size_t)x;
-        }
-        cap = v; init = 1;
+    const char *e = getenv("FSQL_DUCKDB_LEDGER_MAX_BYTES");
+    size_t v = (size_t)256 * 1024 * 1024;
+    if (e && *e) {
+        char *end = NULL;
+        unsigned long long x = strtoull(e, &end, 10);
+        if (end && *end == '\0') v = (size_t)x;
     }
-    return cap;
+    return v;
 }
 
 /* Optional publication of every ledger head, so a tampered or truncated chain can be compared against an

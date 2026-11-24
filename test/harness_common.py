@@ -153,6 +153,16 @@ def run_cli(cmd, **kw):
         cmd = [cmd[0], "-cmd", "SET threads=%s" % t] + list(cmd[1:])
     return subprocess.run(cmd, **kw)
 
+# A sanitizer build pays the instrumented overhead on every statement, so a
+# per-invocation budget that fits the release build can expire mid-statement
+# under ASan/UBSan -- the driver then dies instead of reporting a result. The
+# budget scales with the cell; FSQL_HARNESS_SAN_FACTOR overrides the factor.
+SAN_FACTOR = int(os.environ.get("FSQL_HARNESS_SAN_FACTOR", "10" if SAN else "1"))
+
+def timeout_for(base):
+    """The per-invocation budget for a driver, scaled for a sanitizer build."""
+    return base * SAN_FACTOR
+
 CLEAN_ENV = {k: v for k, v in os.environ.items() if k not in ("AI_AGENT", "CLAUDECODE")}
 # Same opt-outs the harness uses for its (unsigned) mock plugins; the product default refuses an unsigned plugin
 # (a detached .sig beside it is required unless FSQL_REASONING_REQUIRE_SIGNATURE=0).
@@ -177,7 +187,8 @@ def build_plugins():
     import tempfile
     d = os.path.realpath(tempfile.mkdtemp(prefix="capi-mocks-"))
     for name in ("mock_reasoning_plugin", "mock_embed_plugin", "retry_reasoning_plugin",
-                 "think_reasoning_plugin", "evil_lying_length_plugin", "evil_embed_plugin"):
+                 "think_reasoning_plugin", "evil_lying_length_plugin", "evil_embed_plugin",
+                 "scripted_reasoning_plugin"):
         src = os.path.join(REPO, "tests", name + ".c")
         if not os.path.exists(src): continue
         out = os.path.join(d, name + SOEXT)
@@ -188,7 +199,8 @@ def build_mock_enterprise():
     src = os.path.join(CAPI, "test", "mock_enterprise.c")
     d = os.path.realpath(tempfile.mkdtemp(prefix="capi-ent-"))
     for name, flags in (("mock_enterprise", []), ("mock_enterprise_noex", ["-DNO_EX"]),
-                        ("mock_enterprise_nomm", ["-DNO_MM"]), ("mock_enterprise_none", ["-DNO_EX", "-DNO_MM"])):
+                        ("mock_enterprise_nomm", ["-DNO_MM"]), ("mock_enterprise_none", ["-DNO_EX", "-DNO_MM"]),
+                        ("mock_enterprise_noretention", ["-DNO_RETENTION"])):
         out = os.path.join(d, name + SOEXT)
         r = subprocess.run([CC, "-shared", "-fPIC", "-std=c99"] + flags + ["-I" + os.path.join(REPO, "include"), src, "-o", out],
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -222,7 +234,14 @@ atexit.register(_clean_mock_files)
 
 # The parity corpus: one (file, sql, expect, env, diverges, xskip) tuple per blank-line separated case in test/parity/*.sql.
 def cases():
+    # CAPI_PARITY_FILES: run only these corpus files (comma-separated file
+    # names; empty means all of them). The sanitizer cells use it to keep the
+    # run inside a CI budget: the corpus is 800-odd statements and every case
+    # costs a fresh CLI start, which under a sanitizer is seconds each.
+    only = set(x.strip() for x in os.environ.get("CAPI_PARITY_FILES", "").split(",") if x.strip())
     for f in sorted(glob.glob(os.path.join(HERE, "parity", "*.sql"))):
+        if only and os.path.basename(f) not in only:
+            continue
         text = open(f).read()
         for blk in re.split(r"\n\s*\n", text):
             lines = blk.splitlines()

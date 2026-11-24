@@ -402,7 +402,7 @@ function Resolve-ReasoningConfig {
             $envcfg["FSQL_REASONING_HTTP_MODEL"] = $Model
         }
         default {
-            Write-Step "Skipping reasoning config. Search functions like fractal_search and fractal_search_explore work with no model."
+            Write-Step "Skipping reasoning config. Search functions like fractal_sfs_converge and fractal_search_explore work with no model."
         }
     }
     return [pscustomobject]@{ Provider = $Provider; Url = $Url; Model = $Model; Env = $envcfg }

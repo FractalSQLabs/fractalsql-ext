@@ -52,14 +52,14 @@ INSERT INTO demo_alerts (service, message, severity, created_at) VALUES
 
 .print
 .print === 2. Sniper Search: converge to a single best point ===
--- fractal_search(stored_vector, query) is a per-row scalar over a stored
+-- fractal_sfs_converge(stored_vector, query) is a per-row scalar over a stored
 -- column -- for each row it returns that vector's cosine distance to the
 -- query's converged ideal point (the best point the SFS engine computes
 -- once per distinct query per scan, memoized in the session), so order a
 -- small corpus by distance and take the top rows. The one-shot
 -- abstract-space form -- the converged ideal point itself -- is the
--- sibling overload: fractal_search(query, iterations), with
--- fractal_search_debug(query, iterations, population_size,
+-- sibling overload: fractal_sfs_converge(query, iterations), with
+-- fractal_sfs_converge_debug(query, iterations, population_size,
 -- diffusion_factor) as the tunable, diagnostic variant.
 DROP TABLE IF EXISTS demo_points;
 CREATE TABLE demo_points (label text, pt double[]);   -- plain LIST(DOUBLE) values, no CSV TEXT vectors
@@ -68,7 +68,7 @@ INSERT INTO demo_points (label, pt) VALUES
     ('b', [0.1, 0.2, 0.0]),
     ('c', [-0.9, 0.4, 0.0]),
     ('d', [0.0, 0.0, 1.0]);
-SELECT label, fractal_search(pt, ARRAY[0.6, 0.8, 0.0]::float8[]) AS dist
+SELECT label, fractal_sfs_converge(pt, ARRAY[0.6, 0.8, 0.0]::float8[]) AS dist
   FROM demo_points
  ORDER BY dist
  LIMIT 3;

@@ -169,7 +169,7 @@ components. Mirrors core's own THIRD-PARTY-NOTICES-COMMUNITY.md.
   "Efficient and Robust Approximate Nearest Neighbor Search Using
   Hierarchical Navigable Small World Graphs." Implemented in the vendored
   core for a planned persistent-index feature; not currently used by
-  `fractal_search`/`fractal_search_explore`, which do an exact brute-force
+  `fractal_sfs_converge`/`fractal_search_explore`, which do an exact brute-force
   scan (see `bench/README.md`).
 - **DFA -- Detrended Fluctuation Analysis** (`fractal_dimension_dfa`,
   `fractal_dimension_drift`) -- Peng, C.-K., Buldyrev, S. V., Havlin, S.,

@@ -98,14 +98,14 @@ def one_shot(cwd):
         (["--schema-lock-path"], {}, "nonzero"), (["--bind"], {}, "nonzero"), (["x"], {}, "nonzero"),
         (["--list-tools"], {}, "zero"),
         (["--list-tools", "--tool", "fractal_version"], {}, "zero"),
-        (["--list-tools", "--tool", "fractal_version,fractal_search,"], {}, "zero"),
+        (["--list-tools", "--tool", "fractal_version,fractal_sfs_converge,"], {}, "zero"),
         (["--list-tools", "--tool", ","], {}, "zero"), (["--list-tools", "--tool", "no_such_tool"], {}, "zero"),
         (["--list-tools", "--tool", ""], {}, "zero"),
         (["--list-tools", "--category", "admin"], {}, "zero"),
         (["--list-tools", "--category", "admin,discovery,agency,analytics,cognition,enterprise,vectorizer"], {}, "zero"),
         (["--list-tools", "--category", "no_such_category"], {}, "zero"),
-        (["--list-tools", "--category", "admin", "--tool", "fractal_search"], {}, "zero"),
-        (["--list-tools"], {"FSQL_MCP_TOOL_WHITELIST": "fractal_search,fractal_embed"}, "zero"),
+        (["--list-tools", "--category", "admin", "--tool", "fractal_sfs_converge"], {}, "zero"),
+        (["--list-tools"], {"FSQL_MCP_TOOL_WHITELIST": "fractal_sfs_converge,fractal_embed"}, "zero"),
         (["--list-tools"], {"FSQL_MCP_ENABLED_CATEGORIES": "admin"}, "zero"),
         (["--list-tools"], {"FSQL_MCP_ENABLED_CATEGORIES": "", "FSQL_MCP_TOOL_WHITELIST": ""}, "zero"),
         (["--list-tools"], {"FSQL_MCP_STRICT_SCHEMA_HASH": "1"}, "any"),
@@ -174,7 +174,7 @@ def stdio(cwd):
             ("FSQL_MCP_MAX_QUEUE_WAIT_MS", ("0", "1", "-1", "abc", "99999999")),
             ("FSQL_MCP_SHUTDOWN_DRAIN_MS", ("0", "1", "-1", "abc", "50")),
             ("FSQL_MCP_AGENT_PARTIAL", ("on", "off", "true", "1", "0", "garbage")),
-            ("FSQL_MCP_TOOL_WHITELIST", ("fractal_search", "no_such_tool", ",", "")),
+            ("FSQL_MCP_TOOL_WHITELIST", ("fractal_sfs_converge", "no_such_tool", ",", "")),
             ("FSQL_MCP_ENABLED_CATEGORIES", ("admin", "no_such_category", "admin,agency")),
             ("FSQL_MCP_STRICT_SCHEMA_HASH", ("1", "0", "true"))):
         for v in vals:
@@ -409,7 +409,7 @@ def shutdown_during_call(cwd):
     send({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "fractal_version", "arguments": {}}})
     ok &= wait_id(2) is not None
     send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-          "params": {"name": "fractal_search_debug", "arguments": {"query": [0.1] * 32, "iterations": 3000, "population_size": 3000, "diffusion_factor": 2}}})
+          "params": {"name": "fractal_sfs_converge_debug", "arguments": {"query": [0.1] * 32, "iterations": 3000, "population_size": 3000, "diffusion_factor": 2}}})
     time.sleep(0.4)
     t0 = time.monotonic()
     try:

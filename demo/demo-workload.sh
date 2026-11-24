@@ -204,7 +204,7 @@ SCOUT_QUERY = con.execute(
     "SELECT list(round(random(), 4)) FROM range(128)").fetchone()[0]
 scout_sql = "SELECT * FROM fractal_search_explore('wl_vectors', 'emb', %s, %s)" % (
     repr(list(SCOUT_QUERY)), repr(SCOUT_OPTS))
-sniper_sql = "SELECT fractal_search(%s, 30, 30, 2)" % repr(list(SCOUT_QUERY))
+sniper_sql = "SELECT fractal_sfs_converge(%s, 30, 30, 2)" % repr(list(SCOUT_QUERY))
 
 # --- vectorizer: one registered vectorizer, drained before the run ---
 vz_id = con.execute(

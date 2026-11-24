@@ -33,7 +33,12 @@ mkdir -p "$COVDIR" || { echo "coverage: cannot create $COVDIR" >&2; exit 1; }
 case "$(uname -m)" in x86_64|amd64) ARCH=amd64 ;; *) ARCH=arm64 ;; esac
 case "$(uname -s)" in Darwin) PLAT="osx_$ARCH" ;; *) PLAT="linux_$ARCH" ;; esac
 COVEXT="$COVDIR/fractalsql.capi.$PLAT.duckdb_extension"
-GATES="${COV_GATES:-01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34}"
+# Every default-set gate whose driver runs the harness's own artifact: the SQL gates through the runner's FSQL_EXT,
+# the python drivers through CAPI_DIST. Gates 46, 47, 48, 49 and 51 build or resolve their own bands, so they count
+# nothing here; the parity and OOM sweeps behind them are the parity/oom stages. Gate 30 is a stub; its code is
+# gate 66's. Without the 59-73 gates the sources they drive -- the index, its agents, the feature store -- never run
+# against the instrumented build, and the report's floor reads as an unlikely regression when a new source lands.
+GATES="${COV_GATES:-01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 28 29 30 31 32 34 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73}"
 LINE="${COV_LINE:-15}"
 TMPROOT="${TMPDIR:-/tmp}"
 
@@ -50,7 +55,10 @@ fi
 if has gates; then
   say "gates: $GATES"
   for g in $GATES; do
-    out="$(FSQL_EXT="$COVEXT" nice ./build_test.sh --gate "$g" 2>&1)"
+    # FSQL_EXT/CAPI_DIST point every gate at the instrumented build: the SQL gates through the runner,
+    # the resolver-based gates (68, 69, 72, 73) and the band_file drivers (59-61, 63-65, 67, 71) through
+    # the harness's own switch, so all of their counters land in $COVDIR.
+    out="$(FSQL_EXT="$COVEXT" CAPI_DIST="$COVDIR" EDGE_LINE="$LINE" nice ./build_test.sh --gate "$g" 2>&1)"
     printf '%s\n' "$out" | grep -E '^== (ALL GREEN|FAILED)' | sed "s/^/  gate $g: /"
     printf '%s\n' "$out" | grep -E '\[FAIL\]' | head -5
   done

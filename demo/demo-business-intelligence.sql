@@ -40,9 +40,9 @@
 --     each run. (Timing is omitted -- none in-demo;
 --     measure latency at the harness level, e.g.
 --     demo/demo-workload.sh.)
---   * fractal_search(query, iterations) is the abstract-space Sniper
+--   * fractal_sfs_converge(query, iterations) is the abstract-space Sniper
 --     form (raw SFS over the [-1,1] box, returning the ideal point);
---     fractal_search_debug(query, iterations, population_size,
+--     fractal_sfs_converge_debug(query, iterations, population_size,
 --     diffusion_factor) is its diagnostic sibling, returning a
 --     VARCHAR debug report instead of the point.
 --   * Scout Discovery is the fractal_search_explore TABLE function
@@ -309,7 +309,7 @@ SELECT fractal_reason(
 .print Query: recent + frequent + high-value (a "Champions"-shaped target)
 
 -- Positional only (no `name => value` syntax in DuckDB scalar functions).
-SELECT fractal_search(ARRAY[-0.7, 0.7, 0.7]::float8[], 50) AS ideal_profile;
+SELECT fractal_sfs_converge(ARRAY[-0.7, 0.7, 0.7]::float8[], 50) AS ideal_profile;
 
 .print
 .print Notice the ratio between components matches the query direction,

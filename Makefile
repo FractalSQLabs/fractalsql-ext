@@ -45,8 +45,8 @@ endif
 PLATFORM ?= $(PLAT_OS)_$(PLAT_ARCH)
 
 # Sources. The real extension; `make SRC=test/spike/fsql_spike.c CORE_LIB=` builds the P0 spike.
-SRC     ?= src/fractalsql_ext.c src/fsql_duck.c src/fsql_buf.c src/fsql_vector.c src/fsql_sovereign.c src/fsql_enterprise.c src/fsql_reasoning.c src/fsql_config.c src/fsql_ledger.c src/fsql_parse.c src/fsql_t2s.c src/fsql_vectorizer.c src/fsql_agents.c src/fsql_domain_agents.c
-EXTVER  ?= v2.0.1
+SRC     ?= src/fractalsql_ext.c src/fsql_duck.c src/fsql_buf.c src/fsql_vector.c src/fsql_index.c src/fsql_sovereign.c src/fsql_enterprise.c src/fsql_reasoning.c src/fsql_config.c src/fsql_ledger.c src/fsql_parse.c src/fsql_t2s.c src/fsql_vectorizer.c src/fsql_feature_store.c src/fsql_agents.c src/fsql_domain_agents.c
+EXTVER  ?= v2.0.2
 L_VERSION ?= v1.4.5
 COV     ?=
 OUT     ?= dist/$(if $(SAN),san-$(SAN),$(if $(COV),cov,$(PLATFORM)))
@@ -63,7 +63,16 @@ ifneq ($(COV),)
 endif
 # -Wno-missing-field-initializers: the fsql_*_def registration tables rely on C's zero-filled trailing
 # fields (optional bind callback, struct field names); every other warning stays on.
+# Precision plan R3: the files that carry the float paths are built with no contraction and no
+# vectorisation, so the double-precision accumulations are bit-identical everywhere.
 CFLAGS  += -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -fPIC -fvisibility=hidden -D_GNU_SOURCE -Iinclude
+CFLAGS  += -ffp-contract=off -fno-tree-vectorize
+# FSQL_HAVE_IVF: the vendored core archive carries the IVF symbols AND the compiler has no weak
+# externs (MSVC). On GCC the weak-symbol guard is used instead (the entry points are resolved at
+# RUN time), so this is only needed where weak externs do not exist.
+ifneq ($(FSQL_HAVE_IVF),)
+CFLAGS  += -DFSQL_HAVE_IVF
+endif
 
 BAND_S_FILE := $(OUT)/fractalsql.capi.$(PLATFORM).duckdb_extension
 BAND_L_FILE := $(OUT)/fractalsql.$(L_VERSION).$(PLATFORM).duckdb_extension

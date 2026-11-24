@@ -253,6 +253,14 @@ jobs:
           # would say nothing about the MCP surface.
           brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
 
+      - name: Install pip duckdb (best effort, macOS)
+        # The python-driven gates (12 cursor soak, 25 stress driver, 72 kit mutation)
+        # run when a pip `duckdb` matching the built ABI is importable and skip
+        # cleanly when it is not -- so a wheel resolution failure must not fail
+        # the job.
+        if: runner.os == 'macOS'
+        run: python3 -m pip install --break-system-packages "duckdb==${DUCKDB_VERSION#v}" || true
+
       - name: Fetch libduckdb (for the MCP server build)
         if: runner.os == 'macOS'
         run: |
@@ -386,7 +394,7 @@ jobs:
           probe "functions-visible" \
               "SELECT count(*) FROM duckdb_functions() WHERE function_name LIKE 'fractal%';"
           probe "fractal-search-scalar" \
-              "SELECT fractal_search([0.6, 0.8]::DOUBLE[], [0.6, 0.8]::DOUBLE[]);"
+              "SELECT fractal_sfs_converge([0.6, 0.8]::DOUBLE[], [0.6, 0.8]::DOUBLE[]);"
           probe "smoke-test"       "$(cat test/smoke_test.sql)"
           probe "scout-test"       "$(cat test/scout_test.sql)"
           echo "build-test passed on DuckDB ${DUCKDB_VERSION} / linux_${ARCH}"

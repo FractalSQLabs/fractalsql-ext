@@ -41,7 +41,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-VERSION="2.0.1"
+VERSION="2.0.2"
 DIST_DIR="dist/packages"
 mkdir -p "${DIST_DIR}"
 
@@ -154,7 +154,7 @@ This archive ships an UNSIGNED DuckDB extension. Load it with the
 SQL surface:
     fractal_edition()          VARCHAR   -- 'Community'
     fractal_version()          VARCHAR   -- '${VERSION}'
-    fractal_search(vec, query)    DOUBLE    -- SFS-refined cosine distance
+    fractal_sfs_converge(vec, query)    DOUBLE    -- SFS-refined cosine distance
 
 Programmatic (Python):
     import duckdb

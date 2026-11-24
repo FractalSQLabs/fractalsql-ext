@@ -99,10 +99,11 @@ def main():
                         # hydration, the destructive latch, the vectorizer registry/queue, the diversify/feedback
                         # state, and the agents that append decision records or execute generated SQL.
                         "fractal_audit_log", "fractal_ledger_load",
+                        "fractal_index_create", "fractal_index_rebuild", "fractal_index_refresh", "fractal_index_ensure", "fractal_index_drop",
                         "fractal_vectorizer_create", "fractal_vectorizer_pause", "fractal_vectorizer_resume",
                         "fractal_vectorizer_process_queue",
                         "fractal_diversify_enable", "fractal_diversify_disable", "fractal_diversify_set_params",
-                        "fractal_feedback_report", "fractal_isolate_background",
+                        "fractal_feedback_report", "fractal_isolate_background", "fractal_store_morphology",
                         "fractal_agent_data_analyst", "fractal_agent_feedback_audit", "fractal_agent_recommend_diverse",
                         # The configuration writers: they change where the next call goes.
                         "fractal_config_set", "fractal_configure_reasoning"}
@@ -245,7 +246,7 @@ def main():
     check("fractalsql://schema names the fixture tables", "docs" in sch and "metrics" in sch, sch[:200])
     cfg = json.loads(s.call("resources/read", {"uri": "fractalsql://config"})["result"]["contents"][0]["text"])
     check("fractalsql://config reports the extension version, the lock-down and no enterprise tier, and holds no secret",
-          cfg.get("extension_version") == "2.0.1" and cfg.get("locked_down") is True and cfg.get("enterprise_tier") is False
+          cfg.get("extension_version") == "2.0.2" and cfg.get("locked_down") is True and cfg.get("enterprise_tier") is False
           and "http" not in json.dumps(cfg).lower(), cfg)
     check("an unknown resource is an error", "error" in s.call("resources/read", {"uri": "fractalsql://nope"}))
     check("a bad ledger kind is an error", "error" in s.call("resources/read", {"uri": "fractalsql://ledger/9"}))
@@ -258,7 +259,7 @@ def main():
           "result" in s.call("prompts/get", {"name": "ciso_ledger_check", "arguments": {"kind": "{kind}"}}))
 
     # ---------------------------------------------------------------- $/cancel
-    sid = s.send("tools/call", {"name": "fractal_search_debug", "arguments": {"query": [0.1] * 32, "iterations": 2000, "population_size": 2000, "diffusion_factor": 2}})
+    sid = s.send("tools/call", {"name": "fractal_sfs_converge_debug", "arguments": {"query": [0.1] * 32, "iterations": 2000, "population_size": 2000, "diffusion_factor": 2}})
     time.sleep(0.15)
     s.send("notifications/cancelled", {"requestId": sid, "reason": "smoke"}, notify=True)
     try:
@@ -267,7 +268,7 @@ def main():
         pass
     check("$/cancel: the server stays responsive", s.call("ping", {}, timeout=90).get("result") == {} and s.alive())
     e, sc = tool(s, "fractal_version", {})
-    check("a call after a cancel works", not e and sc.get("version") == "2.0.1" and sc.get("edition") == "Community", sc)
+    check("a call after a cancel works", not e and sc.get("version") == "2.0.2" and sc.get("edition") == "Community", sc)
     rc = s.close()
     check("the stdio server exits cleanly (rc 0) when its input ends", rc == 0, rc)
 

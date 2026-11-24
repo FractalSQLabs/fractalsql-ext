@@ -197,7 +197,11 @@ JOIN agent_capabilities m ON m.rowid::text = t.doc_id
 ORDER BY t.distance
 LIMIT 1;
 .print --- rationale (fractal_reason) ---
-SELECT fractal_reason('one-line rationale for this task routing decision');
+SELECT fractal_reason('one-line rationale for this task routing decision',
+    (SELECT 'routed_to=' || m.capability_name || ' confidence=' || round(1.0 / (1.0 + t.distance), 3)
+       FROM fractal_search_telemetry('agent_capabilities', 'embedding', ARRAY[0.15, 0.25, 0.35]::float8[], 1) t
+       JOIN agent_capabilities m ON m.rowid::text = t.doc_id
+      ORDER BY t.distance LIMIT 1));
 .print --- the shipped agent: same composition, one call ---
 SELECT fractal_agent_route_task(
     ARRAY[0.15, 0.25, 0.35]::float8[],

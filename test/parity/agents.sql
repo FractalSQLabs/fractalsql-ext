@@ -2,17 +2,17 @@
 -- The mock embed plugin answers every tier with [0.1,0.2,0.3], so corpora here are 3-dimensional.
 
 -- search_debug
-SELECT fractal_search_debug([0.1, 0.2, 0.3]::DOUBLE[], 5, 10, 2);
+SELECT fractal_sfs_converge_debug([0.1, 0.2, 0.3]::DOUBLE[], 5, 10, 2);
 
-SELECT fractal_search_debug([0.1, 0.2, 0.3]::DOUBLE[], 0, 10, 2);
+SELECT fractal_sfs_converge_debug([0.1, 0.2, 0.3]::DOUBLE[], 0, 10, 2);
 
-SELECT fractal_search_debug([0.1, 0.2, 0.3]::DOUBLE[], 5, 0, 2);
+SELECT fractal_sfs_converge_debug([0.1, 0.2, 0.3]::DOUBLE[], 5, 0, 2);
 
-SELECT fractal_search_debug([0.1, 0.2, 0.3]::DOUBLE[], 5, 10, 99);
+SELECT fractal_sfs_converge_debug([0.1, 0.2, 0.3]::DOUBLE[], 5, 10, 99);
 
-SELECT fractal_search_debug(NULL, 5, 10, 2), fractal_search_debug([1.0]::DOUBLE[], NULL, 10, 2);
+SELECT fractal_sfs_converge_debug(NULL, 5, 10, 2), fractal_sfs_converge_debug([1.0]::DOUBLE[], NULL, 10, 2);
 
-SELECT fractal_search_debug([]::DOUBLE[], 5, 10, 2);
+SELECT fractal_sfs_converge_debug([]::DOUBLE[], 5, 10, 2);
 
 -- corpora
 CREATE TABLE docs (id INTEGER PRIMARY KEY, label VARCHAR, v DOUBLE[]);
@@ -93,7 +93,7 @@ SELECT * FROM fractal_agent_trajectory_predict('ragged', 'v', 1, 0);
 -- env: FSQL_REASONING_HTTP_EMBED_URL=https://embed.invalid/v1/embeddings
 CREATE TABLE kb (id INTEGER PRIMARY KEY, note VARCHAR, v DOUBLE[]);
 INSERT INTO kb VALUES (1, 'alpha', [0.1, 0.2, 0.3]), (2, 'beta', [0.9, 0.1, 0.0]), (3, 'gamma', [0.0, 0.8, 0.5]);
-SELECT answer, source_doc_ids FROM fractal_search_agent('hello', 'kb', 'v', 3, 5);
+SELECT answer, source_row_ids FROM fractal_search_agent('hello', 'kb', 'v', 3, 5);
 SELECT answer FROM fractal_rag_agent('hello', 'kb', 'v', '');
 SELECT branch_id, round(confidence_score, 6), len(plan_trajectory) FROM fractal_agent_plan_explore('start', 'kb', 'v', 2) ORDER BY branch_id;
 SELECT execution_time_ms >= 0 FROM fractal_search_agent('hello', 'kb', 'v', 3, 5);

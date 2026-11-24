@@ -17,17 +17,17 @@
 -- See sql/load_extension.sql for the full sequence.
 --
 -- ---------------------------------------------------------------------
--- 2. Function surface (2.0.1, Community sovereign build)
+-- 2. Function surface (2.0.2, Community sovereign build)
 -- ---------------------------------------------------------------------
 --
 -- Smoke + search:
 --   fractal_edition() -> VARCHAR                        -- 'Community'
---   fractal_version() -> VARCHAR                        -- '2.0.1'
---   fractal_search(vector, query) -> DOUBLE                -- Sniper, memoized
+--   fractal_version() -> VARCHAR                        -- '2.0.2'
+--   fractal_sfs_converge(vector, query) -> DOUBLE                -- Sniper, memoized
 --     (raw-SFS best-point mode overloads:
---      fractal_search(query[, iterations, population_size,
+--      fractal_sfs_converge(query[, iterations, population_size,
 --      diffusion_factor]) -> LIST(DOUBLE))
---   fractal_search_debug(vector, iterations, population_size, diffusion_factor)
+--   fractal_sfs_converge_debug(vector, iterations, population_size, diffusion_factor)
 --                                    -> VARCHAR  -- 4 positional args, no SQL defaults
 --
 -- Scout (aggregate + table-function entry points, same options):
@@ -112,6 +112,14 @@
 --   fractal_agent_trajectory_predict(table, col, baseline_id,
 --     forecast_steps)
 --   fractal_rag_agent(query, table_name, vector_col, meta_filter)
+--   fractal_search(table, col, query, k, options)  (table function)
+--     (the indexed search: the IVF index on (table, col) when one
+--      exists, an exact scan otherwise; every distance exact)
+--   fractal_index_create(table, col[, options])  -> JSON
+--   fractal_index_rebuild(name)                  -> JSON
+--   fractal_index_drop(name)                     -> BOOLEAN
+--   fractal_index_info(name)                     -> JSON
+--   fractal_index_candidates(table, col, query, options) -> BIGINT[]
 --   fractal_search_telemetry(table, col, query, k)
 --   fractal_search_trajectory(table, col, baseline, current, k)
 --   fractal_cross_modal_search(tbl, col, morph, clinic, alpha, k)
@@ -203,7 +211,7 @@ INSERT INTO vectors VALUES (1, [0.6, 0.8, 0.0]),
                            (4, [0.5, 0.5, 0.5]);
 
 -- Top 3 nearest to a query (SFS runs once per distinct query per scan):
-SELECT id, fractal_search(embedding, [0.6, 0.8, 0.0]::DOUBLE[]) AS dist
+SELECT id, fractal_sfs_converge(embedding, [0.6, 0.8, 0.0]::DOUBLE[]) AS dist
 FROM vectors
 ORDER BY dist
 LIMIT 3;

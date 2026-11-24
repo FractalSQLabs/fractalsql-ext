@@ -140,21 +140,21 @@ SELECT fractal_dimension_boxcount(
 .print === 3. Sniper Search: ideal node profile for a GPU-inference workload ===
 
 -- Blueprint (raw primitives): refine the workload vector with
--- fractal_search_debug (the "sniper search" in the abstract [-1,1]^5
+-- fractal_sfs_converge_debug (the "sniper search" in the abstract [-1,1]^5
 -- space, with documented [iterations, population, diffusion] options --
 -- one JSON-formatted VARCHAR whose $.best_fit is the converged cosine
--- fit and $.best_point the refined profile), or the plain fractal_search
+-- fit and $.best_point the refined profile), or the plain fractal_sfs_converge
 -- convergence, then map that profile to a REAL node with
 -- fractal_search_telemetry. Positional args, not `=>`. Generalized by
 -- the shipped fractal_agent_schedule_workload preset (a scalar returning
 -- one JSON document: {assigned_node, confidence, rationale} -- both
 -- steps folded together with one reasoning step):
-SELECT fractal_search(ARRAY[0.3, 0.6, 0.9, 0.2, 0.0]::float8[], 50) AS ideal_profile;
+SELECT fractal_sfs_converge(ARRAY[0.3, 0.6, 0.9, 0.2, 0.0]::float8[], 50) AS ideal_profile;
 
-.print --- sniper: refine the ideal node profile (fractal_search_debug) ---
-SELECT json_extract(fractal_search_debug(ARRAY[0.3, 0.6, 0.9, 0.2, 0.0]::float8[], 50, 50, 2),
+.print --- sniper: refine the ideal node profile (fractal_sfs_converge_debug) ---
+SELECT json_extract(fractal_sfs_converge_debug(ARRAY[0.3, 0.6, 0.9, 0.2, 0.0]::float8[], 50, 50, 2),
                     '$.best_fit')   AS best_fit,
-       json_extract(fractal_search_debug(ARRAY[0.3, 0.6, 0.9, 0.2, 0.0]::float8[], 50, 50, 2),
+       json_extract(fractal_sfs_converge_debug(ARRAY[0.3, 0.6, 0.9, 0.2, 0.0]::float8[], 50, 50, 2),
                     '$.best_point') AS refined_profile;
 -- (Feeding $.best_point through to the telemetry step below needs the
 -- .once/.read spool trick -- DuckDB table functions take compile-time

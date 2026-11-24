@@ -82,9 +82,9 @@ if "%SANMODE%"=="undefined" (
 )
 
 REM The extension: every translation unit under src\, linked with the vendored static core.
-if not defined SRC set "SRC=src\fractalsql_ext.c src\fsql_duck.c src\fsql_buf.c src\fsql_vector.c src\fsql_sovereign.c src\fsql_enterprise.c src\fsql_reasoning.c src\fsql_config.c src\fsql_ledger.c src\fsql_parse.c src\fsql_t2s.c src\fsql_vectorizer.c src\fsql_agents.c src\fsql_domain_agents.c"
+if not defined SRC set "SRC=src\fractalsql_ext.c src\fsql_duck.c src\fsql_buf.c src\fsql_vector.c src\fsql_index.c src\fsql_sovereign.c src\fsql_enterprise.c src\fsql_reasoning.c src\fsql_config.c src\fsql_ledger.c src\fsql_parse.c src\fsql_t2s.c src\fsql_vectorizer.c src\fsql_feature_store.c src\fsql_agents.c src\fsql_domain_agents.c"
 if not defined CORE_LIB set "CORE_LIB=include\windows-x86_64\fractalsql-community-sovereign-c.lib"
-if not defined EXTVER set "EXTVER=v2.0.1"
+if not defined EXTVER set "EXTVER=v2.0.2"
 if not defined L_VERSION set "L_VERSION=v1.4.5"
 set "PLATFORM=windows_amd64"
 set "OUT=dist\%PLATFORM%"
@@ -95,15 +95,21 @@ if "%SANMODE%"=="undefined" ( set "OUT=dist\windows-ubsan" & set "CC=clang-cl" )
 if not "%SANMODE%"=="" set "LINKFLAGS=/INCREMENTAL:NO /DEBUG"
 if not exist "%OUT%" mkdir "%OUT%"
 
-set "CFLAGS=/nologo /O2 /MT /W3 /TC /std:c11 /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /wd4141 /DFSQL_STATIC /Isrc /Iinclude"
+set "CFLAGS=/nologo /O2 /MT /W3 /TC /std:c11 /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /wd4141 /DFSQL_STATIC /fp:precise /Qvec- /Isrc /Iinclude"
 REM The sanitizer cells keep the release build's /MT: the vendored core is a
 REM /MT archive, so a /MD extension would put two heaps in one DLL (and
 REM LNK4098 with it). MSVC's /fsanitize=address imports the DYNAMIC ASan
 REM runtime under /MT too, so the cell still shares the instrumented
 REM CLI's runtime, and ASan's own malloc/free definitions interpose over
 REM the static CRT's -- the extension's heap is still ASan's to check.
-if "%SANMODE%"=="address" set "CFLAGS=/nologo /O2 /MT /W3 /TC /std:c11 /fsanitize=address /Zi /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /wd4141 /DFSQL_STATIC /Isrc /Iinclude"
-if "%SANMODE%"=="undefined" set "CFLAGS=/nologo /O2 /MT /W3 /TC /std:c11 -fsanitize=undefined /Zi /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /wd4141 /DFSQL_STATIC /Isrc /Iinclude"
+if "%SANMODE%"=="address" set "CFLAGS=/nologo /O2 /MT /W3 /TC /std:c11 /fsanitize=address /Zi /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /wd4141 /DFSQL_STATIC /fp:precise /Qvec- /Isrc /Iinclude"
+if "%SANMODE%"=="undefined" set "CFLAGS=/nologo /O2 /MT /W3 /TC /std:c11 -fsanitize=undefined /Zi /D_CRT_SECURE_NO_WARNINGS /D_CRT_NONSTDC_NO_WARNINGS /wd4141 /DFSQL_STATIC /fp:precise /Qvec- /Isrc /Iinclude"
+REM The IVF index. MSVC has no weak externs, so the index TU is compiled against the core's IVF
+REM entry points directly -- the vendored Windows core carries them. FSQL_IVF=0 turns that off (an
+REM older core archive): the index surface is still registered and reports that this build of the
+REM core does not carry the index.
+if "%FSQL_IVF%"=="" set "FSQL_IVF=1"
+if "%FSQL_IVF%"=="1" set "CFLAGS=%CFLAGS% /DFSQL_HAVE_IVF"
 set "S_FILE=%OUT%\fractalsql.capi.%PLATFORM%.duckdb_extension"
 set "L_FILE=%OUT%\fractalsql.%L_VERSION%.%PLATFORM%.duckdb_extension"
 

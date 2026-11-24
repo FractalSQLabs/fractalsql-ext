@@ -16,14 +16,14 @@
 SELECT
     CASE
         WHEN count(DISTINCT function_name) < 4 THEN
-            error('expected fractal_search + fractal_search_explore + fractal_edition '
+            error('expected fractal_sfs_converge + fractal_search_explore + fractal_edition '
                   || '+ fractal_version; got '
                   || count(DISTINCT function_name))
         ELSE 'registration ok: ' || count(DISTINCT function_name) || ' functions'
     END AS status
 FROM duckdb_functions()
 WHERE function_name IN
-    ('fractal_search', 'fractal_search_explore',
+    ('fractal_sfs_converge', 'fractal_search_explore',
      'fractal_edition', 'fractal_version');
 
 -- ----------------------------------------------------------------------
@@ -33,8 +33,8 @@ SELECT CASE WHEN fractal_edition() <> 'Community'
             THEN error('fractal_edition() != Community: ' || fractal_edition())
             ELSE 'edition ok' END AS status;
 
-SELECT CASE WHEN fractal_version() <> '2.0.1'
-            THEN error('fractal_version() != 2.0.1: ' || fractal_version())
+SELECT CASE WHEN fractal_version() <> '2.0.2'
+            THEN error('fractal_version() != 2.0.2: ' || fractal_version())
             ELSE 'version ok' END AS status;
 
 -- ----------------------------------------------------------------------
@@ -46,18 +46,18 @@ SELECT CASE WHEN fractal_version() <> '2.0.1'
 -- and require it > 0.99.
 --
 -- We can't directly read best_point out of a scalar function, but we
--- CAN assert that fractal_search(query, query) is ~0 -- that IS the
+-- CAN assert that fractal_sfs_converge(query, query) is ~0 -- that IS the
 -- cosine distance between query and the refined best_point, and for
 -- a good refinement it should be ~0 (best_point parallel to query).
 -- Query is [0.6, 0.8] -- a unit vector on the x-y plane.
 -- ----------------------------------------------------------------------
 SELECT
     CASE
-        WHEN abs(fractal_search(
+        WHEN abs(fractal_sfs_converge(
                    [0.6, 0.8]::DOUBLE[],
                    [0.6, 0.8]::DOUBLE[])) > 0.01
-        THEN error('convergence failed: fractal_search(q,q) = '
-                   || fractal_search(
+        THEN error('convergence failed: fractal_sfs_converge(q,q) = '
+                   || fractal_sfs_converge(
                           [0.6, 0.8]::DOUBLE[],
                           [0.6, 0.8]::DOUBLE[]))
         ELSE 'convergence ok'
@@ -73,7 +73,7 @@ SELECT
 FROM range(0, 32) t(i);
 
 CREATE TABLE smoke_result AS
-SELECT id, fractal_search(embedding, [0.5, 0.5, 0.0]::DOUBLE[]) AS dist
+SELECT id, fractal_sfs_converge(embedding, [0.5, 0.5, 0.0]::DOUBLE[]) AS dist
 FROM smoke_vectors
 ORDER BY dist
 LIMIT 3;
@@ -109,7 +109,7 @@ FROM (VALUES (1), (8), (64)) AS t(len);
 
 SELECT
     CASE
-        WHEN count_if(NOT isfinite(fractal_search(embedding, [0.5, 0.5, 0.0]::DOUBLE[]))) > 0
+        WHEN count_if(NOT isfinite(fractal_sfs_converge(embedding, [0.5, 0.5, 0.0]::DOUBLE[]))) > 0
             THEN error('P2 happy-path regressed: legitimate list vector rejected')
         ELSE 'P2 happy-path ok'
     END AS status

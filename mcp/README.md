@@ -4,7 +4,7 @@
 
 # fractalsql-ext-mcp
 
-A Model Context Protocol server for FractalSQL on DuckDB: 81 typed tools over the extension's functions, stdio or HTTP/TLS. A standalone C++17 program that links `libduckdb`, loads the extension into its own DuckDB and locks that DuckDB down (no file access, no INSTALL/LOAD, settings frozen).
+A Model Context Protocol server for FractalSQL on DuckDB: 106 typed tools over the extension's functions, stdio or HTTP/TLS. A standalone C++17 program that links `libduckdb`, loads the extension into its own DuckDB and locks that DuckDB down (no file access, no INSTALL/LOAD, settings frozen).
 
     make -C mcp DUCKDB_DIR=/path/to/libduckdb          # duckdb.h + libduckdb.so of the extension's DuckDB version; needs OpenSSL headers
     FSQL_DUCKDB_EXTENSION=/path/fractalsql.duckdb_extension mcp/fractalsql-ext-mcp --list-tools
@@ -46,7 +46,7 @@ Over stdio there is no credential: the client spawns the server as a trusted sub
 
 ```json
 { "tokens": [ { "name": "analyst", "sha256": "<hex sha256 of that client's token>",
-                "tools": ["fractal_search"], "expires": "2027-01-31T00:00:00Z" } ] }
+                "tools": ["fractal_sfs_converge"], "expires": "2027-01-31T00:00:00Z" } ] }
 ```
 
 The file holds the SHA-256 of each token, never the token itself. A refused credential is answered with `401` and `WWW-Authenticate: Bearer realm="fractalsql-mcp"` (`error="invalid_token"` when a token was presented). The `Authorization` header is the only place a credential is read from: a token in the query string is refused, because a query string ends up in proxy logs and browser history. `GET /healthz` and `GET /readyz` answer without a token.

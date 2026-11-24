@@ -77,10 +77,10 @@ runs.
 - **1 -- Setup.** A small `demo_alerts` table with a deliberate story in
   it: a login-attempt count that escalates (3, 3, 17) and a latency
   spike in the last ~10 minutes. Nothing here calls the LLM yet.
-- **2 -- Sniper Search.** `fractal_search(vec, query)` is the per-row
+- **2 -- Sniper Search.** `fractal_sfs_converge(vec, query)` is the per-row
   scalar over a stored column -- it converges each stored vector toward
   the query point, and ordering a small corpus by it returns the closest
-  points. `fractal_search_debug` exposes the tunable abstract-space form
+  points. `fractal_sfs_converge_debug` exposes the tunable abstract-space form
   if you need it; the stored-column form here is fixed at the SFS
   engine's own defaults.
 - **3 -- Reasoning over real data.** `fractal_reason()` gets a real
@@ -316,7 +316,7 @@ by-construction width pinning cover it -- see the storage note in
   this vertical natively -- search, reasoning, and optimization all run
   as pure C inside the same process as the database itself, no external
   vector-DB service required. A 50-node edge-compute fleet: Sniper
-  Search for an ideal node profile (with `fractal_search_debug`
+  Search for an ideal node profile (with `fractal_sfs_converge_debug`
   refining it -- the tunable abstract-space form), Scout Discovery for
   diverse fleet profiles, `fractal_dimension_boxcount` over a facility
   deployment grid, and `fractal_optimize_portfolio` repurposed as a
@@ -546,7 +546,7 @@ The demo exercises all sixteen end to end:
   audit cycle (real `fractal_detect_collapse` + real `fractal_explain_result`);
   pure analytics, **no LLM**, self-disables diversify.
 - **`fractal_agent_schedule_workload`** -- refines a task vector then finds
-  the nearest node (real `fractal_search` + real `fractal_search_telemetry` ->
+  the nearest node (real `fractal_sfs_converge` + real `fractal_search_telemetry` ->
   real `fractal_reason`).
 - **`fractal_agent_rebalance_sibling`** -- optimized book vs nearest
   historical allocation (real `fractal_optimize_portfolio` + real
@@ -753,3 +753,7 @@ DELETE FROM fractal_vectorizers WHERE source_table IN ('bt_bench_docs', 'bmk_doc
   sent as `'{}'`, and the model's default system prompt explicitly
   expects "database search results" to analyze; with nothing there, it
   will say so rather than hallucinate an answer.
+
+* `demo-fractal-index.sql` -- the native IVF index end to end: the build, the indexed
+  search, the exact fallback, the delta (a row committed after the build) and the proof
+  that the index was really used.

@@ -14,6 +14,10 @@
       "name": "fractal_config_get"
     },
     {
+      "description": "Every configuration key the extension knows, as {name, type, session_overridable}: string, path, int, bool or enum (agent_use_index is an enum: off, on, auto). Lets a caller discover the keys instead of hard-coding them; every key is changed with fractal_config_set.",
+      "name": "fractal_config_keys"
+    },
+    {
       "description": "Sets one configuration key of this DuckDB server (the DuckDB column's wrapper over fractal_config_set(key, value)): the reasoning plugin path, the chat and embedding endpoints, the model names, the think mode, the response mode or the enterprise library. The configuration is the environment the extension reads, so the new value is in force from the next call on. FSQL_MCP_CONFIG_WRITES decides what may be written: off refuses every key, safe (the default) allows the model names and the think mode only, and all allows every key. destructiveHint-flagged: repointing an endpoint silently redirects every subsequent reasoning and embedding call, and the enterprise key changes the tier that is loaded.",
       "name": "fractal_config_set"
     },
@@ -230,7 +234,7 @@
       "name": "fractal_periodogram"
     },
     {
-      "description": "Retrieval-augmented answer over a table (rows): embeds the question, retrieves, and answers from the hits. Needs an embedding provider and a model.",
+      "description": "Retrieval-augmented answer over a table (rows: answer, source_row_ids, used_index, context_cut): embeds the question, retrieves (through a fractal_index when agent_use_index allows it), and answers from the hits. meta_filter, a flat JSON object of column: value pairs, limits the rows searched. Needs an embedding provider and a model.",
       "name": "fractal_rag_agent"
     },
     {
@@ -242,12 +246,12 @@
       "name": "fractal_schema_context"
     },
     {
-      "description": "Embed a question, search a table, and answer from the hits (rows). Needs an embedding provider and a model.",
+      "description": "Embed a question, find the nearest rows of a table (a Scout search, or through a fractal_index when agent_use_index allows it), and answer from the hits (rows: answer, execution_time_ms, source_row_ids, used_index, context_cut). meta_filter limits the rows searched. Needs an embedding provider and a model.",
       "name": "fractal_search_agent"
     },
     {
-      "description": "Same Sniper convergence as fractal_search with a full trajectory trace: {dim, generations, population_size, best_point, best_fit, best_fit_per_gen, paths}. best_point is a plain JSON array of numbers.",
-      "name": "fractal_search_debug"
+      "description": "Same Sniper convergence as fractal_sfs_converge with a full trajectory trace: {dim, generations, population_size, best_point, best_fit, best_fit_per_gen, paths}. best_point is a plain JSON array of numbers.",
+      "name": "fractal_sfs_converge_debug"
     },
     {
       "description": "Scout-mode diverse population search: brute-force relevance scan over your embedding column followed by MMR re-ranking to prevent mode collapse; the anti-collapsed-top-K primitive.",
@@ -255,7 +259,7 @@
     },
     {
       "description": "Raw Stochastic Fractal Search: the refined best point for a query, with no table. Use fractal_search_telemetry to search a table.",
-      "name": "fractal_search"
+      "name": "fractal_sfs_converge"
     },
     {
       "description": "Ground-truth K-nearest real table rows to a query vector, by exact cosine distance: [{doc_id, distance, scan_pos}]. doc_id is the row's rowid (a real locator; resolve back with WHERE rowid = doc_id), or the row's 0-indexed position within the scan when the table has no rowid column; scan_pos is the 0-indexed position within THIS call's scan, the handle fractal_feedback_report/fractal_isolate_background want, distinct from doc_id.",
@@ -328,7 +332,103 @@
     {
       "description": "Symmetric int8 quantization of one vector (4x compression). Returns {'scale':S,'codes':[...]}; dequantize via v[i] ~= codes[i]*scale.",
       "name": "fractal_vector_quantize_int8"
+    },
+    {
+      "description": "Approximate nearest neighbours from the native IVF index: [{doc_id, distance, scan_pos}]. The index proposes the candidates and every one of them is verified against the base table, so the distance reported is the exact double-precision cosine. With no index (or with use_index=false) it is an exact scan. Indexed search does NOT apply Diversify repulsion: use fractal_search_explore for a diverse population. The ids option restricts the search to a set of keys: a short set is scanned exactly, a long one goes through the index and is filtered.",
+      "name": "fractal_search"
+    },
+    {
+      "description": "The candidate row ids for Scout: every row of the nearest cells, plus a few representatives of every other cell, plus the rows committed after the index was built.",
+      "name": "fractal_index_candidates"
+    },
+    {
+      "description": "Builds the native IVF index over a vector column and stores it in the database (fractal_index_meta / fractal_index_cells). The build streams: the corpus is never held in memory. The recall calibration chooses the nprobe.",
+      "name": "fractal_index_create"
+    },
+    {
+      "description": "Rebuilds an existing index from the current rows, keeping its options.",
+      "name": "fractal_index_rebuild"
+    },
+    {
+      "description": "Drops an index and its stored cells.",
+      "name": "fractal_index_drop"
+    },
+    {
+      "description": "An index's format, sizes, staleness, recall calibration and the statistics of the last search (rows_scanned, cells_probed) -- the evidence that the index was used. Also a status (ready, stale, degraded, empty or orphaned) and an advice list: for example 'refresh: 60 rows were added since the build', 'rebuild: 30% of the rows were deleted', or 'the build's calibration reached recall 0.63 against a target of 0.95'.",
+      "name": "fractal_index_info"
+    },
+    {
+      "description": "The catalog: one row per index with name, table_name, vector_col, format, dim, rows indexed, rows_now, stale, status (ready, stale, degraded, empty or orphaned) and generation. No rows means no index has been built in this database.",
+      "name": "fractal_index_list"
+    },
+    {
+      "description": "Folds the rows added since the build into the index's cells, as a new generation switched in atomically, without retraining (the model is kept). Returns {name, added, rows, generation, refreshed}. Deleted rows and changed vectors are not touched: use fractal_index_rebuild when fractal_index_info advises a rebuild.",
+      "name": "fractal_index_refresh"
+    },
+    {
+      "description": "Leaves the index on a table and column fit to use, in one call: builds it when missing (created), folds in the added rows when that is all that is needed (refreshed), rebuilds after more than a quarter of the rows were added or a fifth deleted (rebuilt), and otherwise changes nothing (unchanged). Returns {name, action, status, generation, rows}. For a setup script or a scheduled job; a search never builds or changes an index.",
+      "name": "fractal_index_ensure"
+    },
+    {
+      "description": "Splits text into chunks of at most chunk_size characters (code points) and returns a JSON array of {no, start, end, text}; start and end are character offsets, end exclusive. chunk_mode paragraph (default) packs whole paragraphs, sentence packs whole sentences, fixed cuts every chunk_size - chunk_overlap characters; a paragraph or sentence longer than chunk_size is cut with chunk_overlap shared. Pure: no model, the same output on every FractalSQL host.",
+      "name": "fractal_chunk_text"
+    },
+    {
+      "description": "Upserts a feature vector against a doc_id in the generic per-item feature store (table fractalsql_feature_store, created on first use). The last write wins. Returns 'ok'.",
+      "name": "fractal_store_morphology"
+    },
+    {
+      "description": "Brute-force k-NN (true Euclidean, ascending) over the fractal_store_morphology feature store. Returns [{'doc_id','distance'}], nearest first. A stored row whose dimension differs from the surrogate is skipped, not an error.",
+      "name": "fractal_mine_topology_negatives"
+    },
+    {
+      "description": "Builds the canonical vector from an array of numbers. This engine's vector is a plain list of floats, so the input is the array itself, not a text form.",
+      "name": "fractal_vector_from_text"
+    },
+    {
+      "description": "Renders a vector as JSON: the array of numbers, so a client can see exactly what the engine holds.",
+      "name": "fractal_vector_to_json"
+    },
+    {
+      "description": "The vector's dimension: how many components it has. Check it before handing a vector to the vectorizer.",
+      "name": "fractal_vector_dims"
+    },
+    {
+      "description": "The vector's L2 norm (its magnitude).",
+      "name": "fractal_vector_norm"
+    },
+    {
+      "description": "The vector scaled to unit length, so a distance between two vectors reflects direction only.",
+      "name": "fractal_vector_normalize"
+    },
+    {
+      "description": "The element-wise sum of two vectors.",
+      "name": "fractal_vector_add"
+    },
+    {
+      "description": "The element-wise difference of two vectors.",
+      "name": "fractal_vector_sub"
+    },
+    {
+      "description": "The L2 (Euclidean) distance between two vectors.",
+      "name": "fractal_vector_l2_distance"
+    },
+    {
+      "description": "The squared L2 distance: the same measure without the square root.",
+      "name": "fractal_vector_l2_squared"
+    },
+    {
+      "description": "The cosine distance between two vectors: 0 when they point the same way, 1 when they are orthogonal.",
+      "name": "fractal_vector_cosine_distance"
+    },
+    {
+      "description": "The cosine similarity between two vectors: 1 when they point the same way, 0 when they are orthogonal.",
+      "name": "fractal_vector_cosine_similarity"
+    },
+    {
+      "description": "The vector multiplied by a scalar factor.",
+      "name": "fractal_vector_scale"
     }
   ],
-  "version": "2.0.1"
+  "version": "2.0.2"
 }

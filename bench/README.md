@@ -141,7 +141,7 @@ accept.
 A second, unrelated benchmark: on-disk storage size and bulk-insert
 throughput for `FLOAT[dim]` (fixed-size array, what the `vss` HNSW index
 attaches to) vs `DOUBLE[]` (variable-length list, what
-`fractal_search`/`fractal_search_explore` consume), at `data_gen.py`'s real
+`fractal_sfs_converge`/`fractal_search_explore` consume), at `data_gen.py`'s real
 scale rather than a hand-picked single row. Distinct from the
 HNSW-vs-Scout comparison above.
 
@@ -230,3 +230,20 @@ What these numbers do not show:
 The demo tables for these formats are documented in
 [docs/lakehouse-iceberg.md](../docs/lakehouse-iceberg.md) and
 [docs/lakehouse-ducklake.md](../docs/lakehouse-ducklake.md).
+
+## Index and precision benchmarks
+
+* `bench/index_head_to_head.py` -- the native IVF index against the exact scan: the latency of
+  both, the recall of the indexed search, and **how many rows the index actually read** (a
+  benchmark that silently ran flat is reported as such).
+* `bench/precision_agreement.py` -- the precision contract, measured: every SQL-visible distance
+  is recomputed here, in python, with the same double accumulation and the same single rounding,
+  and the two are compared **bit for bit**. A one-ULP disagreement is a failure.
+
+```
+python3 bench/index_head_to_head.py --db bench.duckdb --rows 20000 --dim 64 --queries 20 --k 10
+python3 bench/precision_agreement.py --vectors 64 --dim 32
+```
+
+* `bench/scale_sweep.sh [db-file]` -- runs `head_to_head.py` over a range of corpus sizes on both the `DOUBLE[]` and `FLOAT[dim]` columns, one line per size.
+* `bench/load_fractalsql.py` -- the helper the scripts use to load the local, unsigned extension build into a DuckDB connection (DuckDB extensions are loaded by path).

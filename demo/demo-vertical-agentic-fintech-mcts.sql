@@ -195,7 +195,8 @@ SELECT (SELECT o.opt.sharpe  FROM ftm_opt o) AS sharpe,
 .mode list
 .headers off
 .output ftm_rebal.sql
-SELECT 'SELECT m.alloc_id AS nearest_alloc_id, t.distance AS nearest_distance '
+SELECT 'CREATE OR REPLACE TEMP TABLE ftm_near AS '
+       'SELECT m.alloc_id AS nearest_alloc_id, t.distance AS nearest_distance '
        'FROM fractal_search_trajectory(''historical_allocations'', ''weights'', '
        '[0.5,0.5]::float8[], '
        || CAST((SELECT opt.weights FROM ftm_opt) AS VARCHAR) ||
@@ -208,9 +209,11 @@ SELECT 'SELECT m.alloc_id AS nearest_alloc_id, t.distance AS nearest_distance '
 .headers on
 .mode box
 .read ftm_rebal.sql
+SELECT * FROM ftm_near;
 
 .print --- rationale (fractal_reason over both halves) ---
-SELECT fractal_reason('one-line rebalance rationale for this portfolio');
+SELECT fractal_reason('one-line rebalance rationale for this portfolio',
+    (SELECT to_json(r)::text FROM ftm_opt r) || ' ' || (SELECT to_json(r)::text FROM ftm_near r));
 
 .print --- the shipped agent: same composition, one call ---
 -- Returns one JSON document: {sharpe, weights, nearest_alloc_id,

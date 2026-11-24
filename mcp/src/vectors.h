@@ -34,6 +34,6 @@ namespace fsqlmcp::vectors
     std::string blobToHex( const std::uint8_t* data, std::size_t len );
 
     // {"value": ...} envelope for primitives with no natural JSON shape
-    // (fractal_search, fractal_dimension_dfa, L_p distance, Hamming distance).
+    // (fractal_sfs_converge, fractal_dimension_dfa, L_p distance, Hamming distance).
     Json wrapScalar( const Json& value );
 }

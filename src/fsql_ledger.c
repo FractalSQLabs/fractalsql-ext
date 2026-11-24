@@ -109,10 +109,34 @@ void fsql_ledger_fail(duckdb_function_info info, const char *fn_name, const char
     fsql_fn_error(info, "fractalsql: %s: %s", fn_name, what);
 }
 
+int fsql_conn_sync_retention(FsqlConn *c, char *err, size_t err_cap) {
+    const char *e = getenv("FRACTALSQL_LEDGER_RETENTION");
+    const int want = (e && strcmp(e, "exact") == 0) ? 1 : 0;
+    if (want == c->retention_applied) return 0;
+    const FsqlEnterpriseApi *api = fsql_enterprise_ensure();
+    if (!api || !api->ledger_set_retention) {
+        if (err) snprintf(err, err_cap,
+            "ledger_retention 'exact' needs a FractalSQL Enterprise core library that exports fsql_ledger_set_retention "
+            "(set FRACTALSQL_ENTERPRISE_LIB to a current library, or set ledger_retention to fade)");
+        return -1;
+    }
+    fsql_mu_lock(&c->mu);
+    int rc = api->ledger_set_retention(c->ctx, want);
+    fsql_mu_unlock(&c->mu);
+    if (rc != FSQL_OK) {
+        if (err) snprintf(err, err_cap, "the enterprise library refused the ledger retention mode (rc=%d)", rc);
+        return -1;
+    }
+    c->retention_applied = want;
+    return 0;
+}
+
 /* The connection's state, or fails the call. */
 static FsqlConn *need_conn(duckdb_function_info info, const char *fn) {
     FsqlConn *c = fsql_conn_get(fsql_scalar_instance(info), fsql_exec_conn_id(info));
     if (!c || !c->ctx) { fsql_ledger_fail(info, fn, "fsql_new_sovereign failed (OOM?)"); return NULL; }
+    char rerr[400];
+    if (fsql_conn_sync_retention(c, rerr, sizeof rerr) != 0) { fsql_ledger_fail(info, fn, "%s", rerr); return NULL; }
     return c;
 }
 
@@ -419,18 +443,40 @@ static void audit_unpack_fn(duckdb_function_info info, duckdb_data_chunk in, duc
     for (idx_t i = 0; i < n; i++) {
         if (!fsql_valid(bv, i)) { fsql_set_null(out, i); continue; }
         size_t blen; const char *blob = fsql_str_data(&bd[i], &blen);
+        char *latest_copy = NULL;
+        size_t ws = 0;
+        while (ws < blen && (blob[ws] == ' ' || blob[ws] == '\t' || blob[ws] == '\r' || blob[ws] == '\n')) ws++;
+        if (ws == blen) {   /* '' means the last blob the ledger sealed on this connection */
+            FsqlConn *c = need_conn(info, "fractal_audit_unpack");
+            if (!c) return;
+            fsql_mu_lock(&c->mu);
+            chain *ch = store_find((ledger_store *)c->store, 1);
+            if (ch && ch->n > 0) {
+                chain_entry *le = &ch->e[ch->n - 1];
+                latest_copy = (char *)malloc(le->len ? le->len : 1);
+                if (latest_copy) { memcpy(latest_copy, le->blob, le->len); blen = le->len; }
+            }
+            int had = ch && ch->n > 0;
+            fsql_mu_unlock(&c->mu);
+            if (!had) {
+                fsql_ledger_fail(info, "fractal_audit_unpack", "fractalsql: the chain holds no sealed blob to decode yet; fractal_ledger_flush seals one");
+                return;
+            }
+            if (!latest_copy) { fsql_ledger_fail(info, "fractal_audit_unpack", "out of memory"); return; }
+            blob = latest_copy;
+        }
         size_t cap = AUDIT_START_CAP;
         char *buf = NULL;
         int done = 0;
         while (!done) {
             char *nb = (char *)realloc(buf, cap);
-            if (!nb) { free(buf); fsql_ledger_fail(info, "fractal_audit_unpack", "out of memory"); return; }
+            if (!nb) { free(buf); free(latest_copy); fsql_ledger_fail(info, "fractal_audit_unpack", "out of memory"); return; }
             buf = nb;
             size_t cap_io = cap;
             int rc = ent->audit_unpack(blob, blen, buf, &cap_io);
             if (rc == FSQL_OK) {
                 if (cap_io > cap) {
-                    free(buf);
+                    free(buf); free(latest_copy);
                     fsql_ledger_fail(info, "fractal_audit_unpack", "fractalsql: fsql_audit_unpack reported an out-of-range length -- refusing the result");
                     return;
                 }
@@ -439,18 +485,18 @@ static void audit_unpack_fn(duckdb_function_info info, duckdb_data_chunk in, duc
             } else if (rc == FSQL_ETRUNCATED) {
                 size_t next = cap_io > cap ? cap_io : cap * 2;
                 if (next <= cap || next > AUDIT_MAX_CAP) {
-                    free(buf);
+                    free(buf); free(latest_copy);
                     fsql_ledger_fail(info, "fractal_audit_unpack", "fractalsql: fsql_audit_unpack failed (rc=%d, out of memory)", FSQL_ERR_OOM);
                     return;
                 }
                 cap = next;
             } else {
-                free(buf);
+                free(buf); free(latest_copy);
                 fsql_ledger_fail(info, "fractal_audit_unpack", "fsql_audit_unpack rc=%d", rc);
                 return;
             }
         }
-        free(buf);
+        free(buf); free(latest_copy);
     }
 }
 
@@ -475,7 +521,7 @@ static const fsql_scalar_def kLedgerDefs[] = {
     { "fractal_audit_log",          2, { FSQL_T_VARCHAR, FSQL_T_VARCHAR },                 FSQL_T_BOOLEAN, audit_log_fn, fsql_bind_capture_conn, V },
     { "fractal_audit_log",          3, { FSQL_T_VARCHAR, FSQL_T_VARCHAR, FSQL_T_VARCHAR }, FSQL_T_BOOLEAN, audit_log_fn, fsql_bind_capture_conn, V },
 
-    { "fractal_audit_unpack",       1, { FSQL_T_BLOB }, FSQL_T_VARCHAR, audit_unpack_fn, NULL, 0 },
+    { "fractal_audit_unpack",       1, { FSQL_T_BLOB }, FSQL_T_VARCHAR, audit_unpack_fn, fsql_bind_capture_conn, 0 },
 };
 #undef V
 

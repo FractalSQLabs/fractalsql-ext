@@ -7,7 +7,9 @@
  * signed). Never shipped.
  *
  * Variants (for the loader's optional-symbol branches): -DNO_EX omits the extended multimodal entry point,
- * -DNO_MM omits the plain one (-DNO_EX -DNO_MM omits both).
+ * -DNO_MM omits the plain one (-DNO_EX -DNO_MM omits both), -DNO_RETENTION omits fsql_ledger_set_retention /
+ * fsql_ledger_get_retention (a core older than the retention modes). With them, the retention mode is observable: the
+ * Shadow count reads 33 in exact mode and 3 in fade mode.
  *
  * Build: cc -shared -fPIC -std=c99 -Iinclude mock_enterprise.c -o mock_enterprise.so
  */
@@ -17,13 +19,19 @@
 
 #include "fractalsql_sql.h"
 
+static int g_retention;   /* 0 fade, 1 exact */
+#ifndef NO_RETENTION
+int fsql_ledger_set_retention(fsql_ctx *c, int mode) { (void)c; if (mode < 0 || mode > 1) return 1; g_retention = mode; return FSQL_OK; }
+int fsql_ledger_get_retention(const fsql_ctx *c, int *out) { (void)c; *out = g_retention; return FSQL_OK; }
+#endif
+
 int fsql_ledger_flush(fsql_ctx *c)      { (void)c; return FSQL_OK; }
 int fsql_ledger_load(fsql_ctx *c)       { (void)c; return FSQL_ESTORAGE_UNAVAILABLE; }  /* nothing stored yet */
 int fsql_ledger_compact(fsql_ctx *c)    { (void)c; return FSQL_OK; }
 int fsql_ledger_reset_soft(fsql_ctx *c) { (void)c; return FSQL_OK; }
 int fsql_ledger_reset_hard(fsql_ctx *c) { (void)c; return FSQL_OK; }
 int fsql_ledger_truth_count(const fsql_ctx *c, size_t *n)  { (void)c; *n = 7; return FSQL_OK; }
-int fsql_ledger_shadow_count(const fsql_ctx *c, size_t *n) { (void)c; *n = 3; return FSQL_OK; }
+int fsql_ledger_shadow_count(const fsql_ctx *c, size_t *n) { (void)c; *n = g_retention ? 33 : 3; return FSQL_OK; }
 
 /* Writes "{"unpacked":<len>,"pad":"xxxx..."}"; wants 6000 bytes of room so the caller's growth path
  * (4096 -> reported size) is exercised. An input starting with 0xFF fails; one starting with 0xFE reports a

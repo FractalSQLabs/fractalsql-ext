@@ -10,7 +10,7 @@ Each scenario is one CLI session under its own process environment (the cap and 
 Env: CAPI_DIST / EDGE_LINE as in edge_inputs.py. Exit status is nonzero when any check fails."""
 import json, os, re, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # python3 -I drops the script dir
-from harness_common import signature_policy, PLUGINS, CLEAN_ENV, latest_cli, band_file
+from harness_common import signature_policy, PLUGINS, CLEAN_ENV, latest_cli, band_file, timeout_for
 
 LINE = os.environ.get("EDGE_LINE", "15")
 CLI, EXT = latest_cli(LINE), band_file(LINE)
@@ -45,7 +45,7 @@ def session(sql, env_extra=None, enterprise=True):
     # its own error (it is refused while the destructive latch is set) is not one of theirs.
     script = ("LOAD '%s';\n" % EXT + "".join("SELECT '@@%d';\n%s\n" % (i, s) for i, s in enumerate(stmts))
               + "SELECT '@@%d';\nSELECT fractal_release();\n" % len(stmts))
-    p = subprocess.run([CLI, "-unsigned", "-batch", "-csv", "-noheader"], input=script, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=300)
+    p = subprocess.run([CLI, "-unsigned", "-batch", "-csv", "-noheader"], input=script, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=timeout_for(300))
     out = p.stdout.split("\n")
     # stdout carries the successful results between markers; errors go to stderr in order, so attribute errors by counting
     chunks, cur = {}, None
@@ -113,6 +113,18 @@ check(v == {"ok": True, "rows_verified": ok_n}, "the chain that was kept still v
 r, _ = session(rows[:3] + ["SELECT fractal_ledger_verify(2);"], {"FSQL_DUCKDB_LEDGER_MAX_BYTES": "0"})
 check(js(r[3][1]) == {"ok": True, "rows_verified": 3}, "a cap of 0 means unlimited", r)
 
+# the same cap as a config key, set from SQL and read on every append
+r, err = session(["SELECT fractal_config_set('ledger_max_bytes','400');"] + rows + ["SELECT fractal_ledger_verify(2);"])
+ok_n = sum(1 for x in r[1:9] if x == ("ok", "true"))
+check(r[0] == ("ok", "true") and 0 < ok_n < 8, "the config key ledger_max_bytes caps the ledger like the environment variable", [x[0] for x in r[:9]])
+check(js(r[9][1]) == {"ok": True, "rows_verified": ok_n}, "...and the chain that was kept verifies", r[9])
+r, _ = session(["SELECT fractal_config_set('ledger_max_bytes','400');", "SELECT fractal_config_set('ledger_max_bytes','0');"] + rows[:3] + ["SELECT fractal_ledger_verify(2);"])
+check(js(r[5][1]) == {"ok": True, "rows_verified": 3}, "the key can be changed again within a session (0 = unlimited)", r)
+r, _ = session(["SELECT fractal_config_set('ledger_max_bytes','abc');"])
+check(r[0][0] == "err" and "ledger_max_bytes" in r[0][1], "a value that is not a number is refused", r[0])
+r, _ = session(["SELECT fractal_config_keys();"])
+check('"ledger_max_bytes","type":"int"' in r[0][1].replace('""', '"'), "fractal_config_keys lists ledger_max_bytes as an int", r[0][1][:200])
+
 # ---------------------------------------------------------------- the destructive latch
 r, _ = session(["SELECT fractal_audit_log('decision','{\"a\":1}');",
                 "SELECT fractal_lock_destructive();",
@@ -136,6 +148,27 @@ check(js(r[3][1]) == {"ok": True, "rows_verified": 0}, "verify is community-side
 check(r[4] == ("ok", "locked"), "the latch is community-side too", r[4])
 r, err = session(["SELECT fractal_ledger_flush();"], {"FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE": "1"})
 check(r[0][0] == "err" and "no signature found" in err, "an unsigned enterprise library is refused (and the reason logged) when a signature is required", (r[0], err[:200]))
+
+# ---------------------------------------------------------------- ledger retention (fade | exact)
+COALESCED = "SELECT coalesce(fractal_config_get('ledger_retention'), 'unset');"
+r, _ = session([COALESCED, "SELECT fractal_config_set('ledger_retention', 'forever');", "SELECT fractal_config_set('ledger_retention', 'exact');", COALESCED,
+                "SELECT fractal_config_set('ledger_retention', '');", COALESCED], enterprise=False)
+check(r[0] == ("ok", "unset"), "ledger_retention starts unset (the default is fade)", r[0])
+check(r[1][0] == "err" and "fade, exact" in r[1][1], "an unknown ledger_retention value is refused and names the choices", r[1])
+check(r[2] == ("ok", "true") and r[3] == ("ok", "exact"), "ledger_retention exact is accepted and reads back", r[2:4])
+check(r[4] == ("ok", "true") and r[5] == ("ok", "unset"), "an empty value unsets it again", r[4:6])
+# the mock core's Shadow count shows which mode the context is in: 3 in fade, 33 in exact
+r, _ = session(["SELECT fractal_ledger_shadow_count();"])
+check(r[0] == ("ok", "3"), "fade (the default) leaves the core's context in its own default mode", r[0])
+r, _ = session(["SELECT fractal_ledger_shadow_count();"], {"FRACTALSQL_LEDGER_RETENTION": "exact"})
+check(r[0] == ("ok", "33"), "the configured exact mode reaches the core's context before the first ledger call", r[0])
+r, _ = session(["SELECT fractal_config_set('ledger_retention', 'exact');", "SELECT fractal_ledger_shadow_count();",
+                "SELECT fractal_config_set('ledger_retention', 'fade');", "SELECT fractal_ledger_shadow_count();"])
+check(r[1] == ("ok", "33") and r[3] == ("ok", "3"), "changing the mode on a live connection takes effect on the next ledger call", r)
+r, _ = session(["SELECT fractal_ledger_shadow_count();"], {"FRACTALSQL_LEDGER_RETENTION": "exact", "FRACTALSQL_ENTERPRISE_LIB": PLUGINS["mock_enterprise_noretention"]})
+check(r[0][0] == "err" and "fsql_ledger_set_retention" in r[0][1], "exact is refused by a core library that predates the retention modes", r[0])
+r, _ = session(["SELECT fractal_ledger_shadow_count();"], {"FRACTALSQL_ENTERPRISE_LIB": PLUGINS["mock_enterprise_noretention"]})
+check(r[0] == ("ok", "3"), "fade needs no export: a core library without the modes still serves the ledger", r[0])
 
 # ---------------------------------------------------------------- anchor log modes
 r, err = session(["SELECT fractal_audit_log('decision','{}');"], {"FSQL_LEDGER_ANCHOR_LOG": "off"})

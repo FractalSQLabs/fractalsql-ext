@@ -88,7 +88,7 @@ SELECT fractal_edition(), fractal_version();
 -- 1. Search (3 functions)
 -- ------------------------------------------------------------------
 .print
-.print === Search: fractal_search, fractal_search_debug ===
+.print === Search: fractal_sfs_converge, fractal_sfs_converge_debug ===
 
 DROP TABLE IF EXISTS bmk_corpus;
 DROP SEQUENCE IF EXISTS seq_bmk_corpus_id;
@@ -107,11 +107,11 @@ FROM generate_series(1, 100) gs(gs);
 -- documents).
 
 -- DuckDB scalar functions take positional args only (no `name => value`).
-SELECT fractal_search(ARRAY[0.6,0.8,0,0,0,0,0,0]::float8[], 30);
--- fractal_search_debug returns a JSON-formatted VARCHAR (a plain
+SELECT fractal_sfs_converge(ARRAY[0.6,0.8,0,0,0,0,0,0]::float8[], 30);
+-- fractal_sfs_converge_debug returns a JSON-formatted VARCHAR (a plain
 -- string, no native JSON type) -- printed whole here; demo/
 -- demo-agents.sql's section 12a pulls one field out with json_extract().
-SELECT fractal_search_debug(ARRAY[0.6,0.8,0,0,0,0,0,0]::float8[], 10, 50, 2);
+SELECT fractal_sfs_converge_debug(ARRAY[0.6,0.8,0,0,0,0,0,0]::float8[], 10, 50, 2);
 
 .print
 .print === Search: fractal_search_explore ===

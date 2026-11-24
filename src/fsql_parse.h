@@ -41,6 +41,13 @@ bool fsql_review_passed(const char *reply);
 /* EXPLAIN (FORMAT json) names its operators as "name": "DELETE" ... */
 bool fsql_plan_has_modifying_operator(const char *json);
 
+/* Split text into chunks of at most `size` characters (code points) and write a malloc'd JSON array of {"no","start","end","text"} to *out
+ * (free() it). mode: 0 fixed, 1 paragraph, 2 sentence. The same algorithm, with the same output, runs in every FractalSQL host. Returns 0,
+ * or 1 when more than 100000 chunks would be produced, or -1 on out of memory. size must be 1..100000 and overlap 0..size-1 (the caller checks). */
+#define FSQL_CHUNK_MAX_SIZE   100000
+#define FSQL_CHUNK_MAX_CHUNKS 100000
+int fsql_chunk_text(const unsigned char *t, size_t blen, long size, long overlap, int mode, char **out);
+
 #ifdef __cplusplus
 }
 #endif

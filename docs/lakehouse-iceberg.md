@@ -46,7 +46,7 @@ as `FLOAT[]` or `DOUBLE[]`. FractalSQL functions take one or the other:
 | Function | Argument type | `list<float>` (`FLOAT[]`) | `list<double>` (`DOUBLE[]`) |
 | --- | --- | --- | --- |
 | `fractal_vector_cosine_similarity` | `FLOAT[]` | works as is | cast: `CAST(emb AS FLOAT[])` |
-| `fractal_search`, `fractal_search_explore` | `DOUBLE[]` | widened implicitly | works as is |
+| `fractal_sfs_converge`, `fractal_search_explore` | `DOUBLE[]` | widened implicitly | works as is |
 | `fractal_agent_outlier_intercept` | `DOUBLE[]` | widened implicitly | works as is |
 
 Show the cast in your own queries, or materialize it once:

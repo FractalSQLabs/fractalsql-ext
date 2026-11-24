@@ -297,12 +297,14 @@ SELECT r.sharpe, r.weights FROM (
 -- The shipped preset (a scalar returning one JSON document:
 -- {sharpe, weights, nearest_alloc_id, nearest_distance, rationale};
 -- seed arg 42 pins the optimizer for reproducibility):
+CREATE OR REPLACE TEMP TABLE vqf_rebal AS
 SELECT fractal_agent_rebalance_sibling(
     (SELECT array_agg(mu ORDER BY asset_id) FROM vqf_assets),
     (SELECT array_agg(cov_ij ORDER BY i, j) FROM vqf_cov_flat),
     8, 'vqf_allocation_snapshots', 'alloc',
     (SELECT array_agg((1.0 / 25.0)::float8 ORDER BY asset_id) FROM vqf_assets),
-    42, 5, 'id', '{}'::text);
+    42, 5, 'id', '{}'::text) AS rebalance;
+SELECT rebalance FROM vqf_rebal;
 
 -- ------------------------------------------------------------------
 -- 5. Reasoning: the regime-shift + optimized-allocation narrative is now
@@ -312,10 +314,10 @@ SELECT fractal_agent_rebalance_sibling(
 -- ------------------------------------------------------------------
 .print
 .print === 5. Reasoning: absorbed into the Section 3 + Section 4 preset rationales ===
--- The narrative is split across the two preset rationales above; the
--- standalone closing call is kept raw beside them (the same call both
--- presets fold):
-SELECT fractal_reason('one-line rationale tying this market regime shift to the optimized 8-asset rebalance and its nearest historical pattern');
+-- The narrative is split across the two preset rationales above; this
+-- standalone closing call reasons over the rebalance findings directly:
+SELECT fractal_reason('one-line rationale tying this market regime shift to the optimized 8-asset rebalance and its nearest historical pattern',
+    (SELECT to_json(r)::text FROM vqf_rebal r));
 
 -- ------------------------------------------------------------------
 -- 6. Headline check: the demo's own claims, recomputed from the demo's

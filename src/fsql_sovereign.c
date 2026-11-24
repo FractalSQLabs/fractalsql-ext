@@ -952,7 +952,7 @@ static void optimize_portfolio_fn(duckdb_function_info info, duckdb_data_chunk i
         if (!fsql_valid(kvv, i)) { fsql_fn_error(info, "fractalsql: k must not be NULL"); goto done; }
         int32_t k32 = kv[i];
         size_t n_assets = mn;
-        if (n_assets > 8192 || cn != n_assets * n_assets) {   /* bounded so n*n cannot wrap (SECURITY_AUDIT.md 3.15) */
+        if (n_assets > 8192 || cn != n_assets * n_assets) {   /* bounded so n*n cannot wrap */
             fsql_fn_error(info, "fractalsql: cov length (%zu) must be n_assets^2 (n_assets=%zu, expected %zu)", cn, n_assets, n_assets * n_assets);
             goto done;
         }
@@ -1078,6 +1078,8 @@ done:
 static FsqlConn *div_conn(duckdb_function_info info, const char *fn) {
     FsqlConn *c = fsql_conn_get(fsql_scalar_instance(info), fsql_exec_conn_id(info));
     if (!c || !c->ctx) { fsql_ledger_fail(info, fn, "fsql_new_sovereign failed (OOM?)"); return NULL; }
+    char rerr[400];
+    if (fsql_conn_sync_retention(c, rerr, sizeof rerr) != 0) { fsql_ledger_fail(info, fn, "%s", rerr); return NULL; }
     return c;
 }
 

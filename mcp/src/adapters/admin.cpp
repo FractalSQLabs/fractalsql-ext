@@ -77,6 +77,7 @@ namespace fsqlmcp
             { "http_allow_plaintext","FSQL_REASONING_HTTP_ALLOW_PLAINTEXT", false, false },
             { "http_token",          "FSQL_REASONING_HTTP_TOKEN",         true,  false },
             { "enterprise_lib",      "FRACTALSQL_ENTERPRISE_LIB",         false, true },
+            { "ledger_retention",    "FRACTALSQL_LEDGER_RETENTION",       false, true },
         };
 
         const std::size_t kConfigKeyCount = sizeof( kConfigKeys ) / sizeof( kConfigKeys[ 0 ] );

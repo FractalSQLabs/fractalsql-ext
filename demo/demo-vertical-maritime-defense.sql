@@ -260,7 +260,8 @@ SELECT fractal_dimension_dfa(
 .mode list
 .headers off
 .output vmd_traj2.sql
-SELECT 'SELECT doc_id, distance FROM fractal_search_trajectory(''vmd_vessels'', ''current'', ' ||
+SELECT 'CREATE OR REPLACE TEMP TABLE vmd_traj2_res AS '
+       'SELECT doc_id, distance FROM fractal_search_trajectory(''vmd_vessels'', ''current'', ' ||
        (SELECT baseline FROM vmd_vessels WHERE id = 7)::VARCHAR ||
        ', ' || (SELECT current FROM vmd_vessels WHERE id = 7)::VARCHAR ||
        ', 5);'
@@ -269,6 +270,8 @@ SELECT 'SELECT doc_id, distance FROM fractal_search_trajectory(''vmd_vessels'', 
 .mode box
 .headers on
 .read vmd_traj2.sql
+SELECT * FROM vmd_traj2_res;
+CREATE OR REPLACE TEMP TABLE vmd_dfa_res AS
 SELECT fractal_dimension_dfa(
     (SELECT array_agg(cum ORDER BY t) FROM (
         SELECT t, sum(step) OVER (ORDER BY t) AS cum
@@ -277,10 +280,11 @@ SELECT fractal_dimension_dfa(
                   FROM generate_series(1, 120) t(t)) s
     ) c)
 ) AS heading_series_dfa_exponent;
+SELECT * FROM vmd_dfa_res;
 
--- The composition's standalone reason leg -- kept raw exactly as the
--- composition ran it (same narrative, not a bare ping):
-SELECT fractal_reason('one-line track-anomaly read for this vessel');
+-- A standalone reasoning call over the findings above:
+SELECT fractal_reason('one-line track-anomaly read for this vessel',
+    (SELECT json_group_array(to_json(r))::text FROM vmd_traj2_res r) || ' ' || (SELECT to_json(r)::text FROM vmd_dfa_res r));
 
 -- The shipped preset folds both raw forms above into one reasoning
 -- step (same fixtures):

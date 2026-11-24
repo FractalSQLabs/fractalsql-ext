@@ -1,1 +1,0 @@
-ATTACH 'ducklake:/tmp/claude-1000/-home-dj/30db8487-bebc-4318-bab1-9f467e7ab736/scratchpad/lake-dl/ducklake/tickets-1.5.ducklake' AS lake (DATA_PATH '/tmp/claude-1000/-home-dj/30db8487-bebc-4318-bab1-9f467e7ab736/scratchpad/lake-dl/ducklake/data/', READ_ONLY);

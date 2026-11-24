@@ -279,11 +279,20 @@ static int ensure_tier_ctx_locked(int tier, fsql_ctx **out, char *err, size_t ca
     }
     t->tried = true;
 
-    const char *path = getenv("FRACTALSQL_REASONING_PLUGIN");
-    if (!path || !*path)
-        return record_fail(t, true, err, cap,
-            "fractalsql: reasoning plugin not configured -- set FRACTALSQL_REASONING_PLUGIN to the absolute path of a "
-            "compiled fractalsql-reasoning-*.so to enable this function");
+    /* Copied before any environment change: a pointer from getenv() is invalid once setenv()/unsetenv() runs
+     * (POSIX), and this one is handed to the signature verifier and to dlopen below. */
+    char path[1024];
+    {
+        const char *p = getenv("FRACTALSQL_REASONING_PLUGIN");
+        if (!p || !*p)
+            return record_fail(t, true, err, cap,
+                "fractalsql: reasoning plugin not configured -- set FRACTALSQL_REASONING_PLUGIN to the absolute path of a "
+                "compiled fractalsql-reasoning-*.so to enable this function");
+        if (strlen(p) >= sizeof path)
+            return record_fail(t, true, err, cap, "fractalsql: FRACTALSQL_REASONING_PLUGIN is too long (limit %zu bytes)",
+                               sizeof path - 1);
+        memcpy(path, p, strlen(p) + 1);
+    }
 
     /* Embed tier: the endpoint must be configured. Rejected here so the clear error fires before
      * any environment mutation. No fallback to the chat URL: a chat model is not a substitute for

@@ -21,7 +21,7 @@
 --     1.8 - 0.9) and each seed is built directly in [-1,1) with no
 --     remapping step. The draws are the same on every machine, core
 --     count and DuckDB build.
---   * fractal_search_debug(query, iterations, population,
+--   * fractal_sfs_converge_debug(query, iterations, population,
 --     diffusion_factor) is the abstract-space form, returning one
 --     VARCHAR JSON document whose $.best_point key is the converged
 --     point.
@@ -81,7 +81,7 @@ WITH q AS (
     SELECT ARRAY(SELECT bt_rand(i) * 2 - 1 FROM generate_series(1, 8) g(i))::float8[] AS query
 ),
 r AS (
-    SELECT query, fractal_search(query, 50, 50, 2) AS best FROM q
+    SELECT query, fractal_sfs_converge(query, 50, 50, 2) AS best FROM q
 )
 SELECT
     8 AS dim,
@@ -95,7 +95,7 @@ WITH q AS (
     SELECT ARRAY(SELECT bt_rand(1000 + i) * 2 - 1 FROM generate_series(1, 32) g(i))::float8[] AS query
 ),
 r AS (
-    SELECT query, fractal_search(query, 50, 50, 2) AS best FROM q
+    SELECT query, fractal_sfs_converge(query, 50, 50, 2) AS best FROM q
 )
 SELECT
     32 AS dim,
@@ -109,7 +109,7 @@ WITH q AS (
     SELECT ARRAY(SELECT bt_rand(2000 + i) * 2 - 1 FROM generate_series(1, 128) g(i))::float8[] AS query
 ),
 r AS (
-    SELECT query, fractal_search(query, 50, 50, 2) AS best FROM q
+    SELECT query, fractal_sfs_converge(query, 50, 50, 2) AS best FROM q
 )
 SELECT
     128 AS dim,

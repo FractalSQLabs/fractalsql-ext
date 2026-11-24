@@ -60,6 +60,37 @@ DFA's complement: localizes *where* a series' mean and/or variance shifted, inst
 **Signature**: `fractal_change_point_detect(LIST(DOUBLE), INTEGER[, DOUBLE[, INTEGER]]) -> LIST(BIGINT)`
 Sliding two-sample test over adjacent windows of `win` samples; flags a boundary when the mean differs by more than `threshold` pooled-standard-deviation units or the variance ratio exceeds `threshold` squared. Returns ascending boundary indices, up to `max_points`. Requires at least `2 * win` points. Defaults via arity overloads (DuckDB scalar functions can't declare `DEFAULT` clauses): 2-arg (threshold 2.0, max_points 64), 3-arg (max_points 64), 4-arg explicit.
 
+### `fractal_chunk_text`
+**Split long text into chunks (pure, no model)**
+
+**Signature**: `fractal_chunk_text(text VARCHAR, size INTEGER, overlap INTEGER [, mode VARCHAR]) RETURNS VARCHAR` (a JSON array of `{"no","start","end","text"}`)
+
+Splits `text` into chunks of at most `size` characters and returns a JSON array. `start` and `end` are character offsets into the original text (`end` is exclusive), and `text` is that slice. Characters are UTF-8 code points, not bytes. `size` is 1 to 100000, `overlap` is 0 to `size - 1`, and at most 100000 chunks are produced. A NULL text gives NULL; an empty or blank text gives `[]`.
+
+| `mode` | How the text is cut |
+| --- | --- |
+| `paragraph` (the default) | At paragraph breaks (a run of blanks that contains at least two line feeds). Whole paragraphs are packed into a chunk while it stays within `size`. |
+| `sentence` | After a run of `.`, `!` or `?` that is followed by whitespace or the end. Whole sentences are packed the same way; a paragraph break also ends a sentence. |
+| `fixed` | Every `size - overlap` characters, ignoring the text's structure. |
+
+A paragraph or sentence longer than `size` is cut like a fixed span, and neighbouring pieces share `overlap` characters. `overlap` applies only to such cuts and to `fixed`. The size is in characters, not tokens: pick it a little under your embedding model's limit.
+
+```sql
+SELECT e->>'$.no' AS no, e->>'$.text' AS chunk
+FROM (SELECT unnest(from_json(fractal_chunk_text('One. Two sentences! Is this three? Yes.', 20, 0, 'sentence'), '["JSON"]')) AS e);
+```
+
+DuckDB has no triggers, so the vectorizer does not chunk for you here. To embed long documents, fill a chunk table yourself with `INSERT ... SELECT` over this function and point `fractal_vectorizer_create` at the chunk table:
+
+```sql
+CREATE TABLE doc_chunks (id BIGINT PRIMARY KEY, parent_id BIGINT, chunk_no INTEGER, chunk_text VARCHAR, embedding DOUBLE[]);
+INSERT INTO doc_chunks
+SELECT row_number() OVER (), d.id, (c->>'$.no')::INTEGER, c->>'$.text', NULL
+FROM docs d, unnest(from_json(fractal_chunk_text(d.body, 800, 100), '["JSON"]')) AS t(c);
+```
+
+The same function, with the same output, is available on every FractalSQL host.
+
 ### `fractal_periodogram`
 **Classical Periodogram**
 Power at each positive Fourier frequency, computed by direct $O(n^2)$ DFT (exact, not an FFT approximation).
@@ -151,7 +182,9 @@ individually here.
   use with the rest of this section's functions.
 - `fractal_vector_to_float8_array(v FLOAT[]) -> DOUBLE[]`: widens back up,
   for feeding a `fractal_vector_*` result into a `DOUBLE[]`-typed function
-  elsewhere (e.g. `fractal_search`, `fractal_search_telemetry`).
+  elsewhere (e.g. `fractal_sfs_converge`, `fractal_search_telemetry`).
+
+Every distance in this section is computed by the one shared double-precision implementation, so the values agree to the last bit with the other SQL-visible distances and with every other FractalSQL host -- see the precision contract in [api-discovery.md](api-discovery.md).
 
 ### `fractal_vector_lp_distance`
 **Generalized $L_p$ Distance**
@@ -235,16 +268,15 @@ Generalizes `fractal_optimize_portfolio`'s cardinality-constrained search into a
 
 ## Named Feature Store
 
-**Not available in the DuckDB edition.** Other FractalSQL editions offer a generic per-item vector store for custom
-metadata or flagged examples: one function upserts a feature vector against a `doc_id` into a
-persistent table, and the other runs a brute-force k-NN scan over that table. DuckDB has no equivalent function
-today. To get the same effect, keep the vectors in an ordinary table and rank them with the vector
-functions above (for example `ORDER BY fractal_vector_l2_distance(vec, query) LIMIT k`).
+A generic per-item vector store for custom metadata or flagged examples. One function upserts a feature vector against a `doc_id`
+into a table (`fractalsql_feature_store`, created on first use); the other runs a brute-force nearest-neighbour scan over it.
 
 ### `fractal_store_morphology`
-Upserts a vector against a `doc_id`.
-**Not built in the DuckDB edition.** Signature in the editions that have it: `fractal_store_morphology(doc_id BIGINT, feature_array DOUBLE[])`
+Upserts a vector against a `doc_id`; the last write wins.
+**Signature**: `fractal_store_morphology(doc_id BIGINT, feature_array VARCHAR | DOUBLE[]) -> VARCHAR ('ok')`
+The vector is a `DOUBLE[]`, a JSON array (`'[1,2,3]'`) or a comma-separated list (`'1,2,3'`). A negative `doc_id` is refused; a NULL argument answers NULL.
 
 ### `fractal_mine_topology_negatives`
-Brute-force k-NN scan over the feature store.
-**Not built in the DuckDB edition.** Signature in the editions that have it: `fractal_mine_topology_negatives(surrogate_vector DOUBLE[], k INTEGER) -> TABLE(doc_id BIGINT, distance DOUBLE)`
+Brute-force k-NN over the feature store, by true Euclidean distance, nearest first.
+**Signature**: `fractal_mine_topology_negatives(surrogate_vector VARCHAR | DOUBLE[], k INTEGER) -> VARCHAR`
+Returns a JSON array `[{"doc_id":..,"distance":..}]`. A stored vector of a different dimension is skipped. `k` must be positive.

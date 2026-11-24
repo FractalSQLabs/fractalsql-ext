@@ -235,7 +235,7 @@ No background worker, no trigger. You control exactly when and how often `proces
 
 ## Known Constraints & Roadmap
 
-- **Text Chunking**: sends the full text of the column to the provider. For documents exceeding model context limits, pre-chunk into a separate "chunks" table.
+- **Text Chunking**: sends the full text of the column to the provider. For documents exceeding model context limits, chunk them into a separate chunk table with `fractal_chunk_text` (see [api-analytics.md](api-analytics.md)): DuckDB has no triggers, so the vectorizer does not keep a chunk table in step with its source on this host.
 - **Rate Capping**: not implemented (see above).
 - **Automatic Retries**: Failed rows are not retried automatically; reset them to `'pending'` in `fractal_vectorizer_queue` yourself.
 - **Backfill Batching**: Initial backfill for very large tables runs as one `INSERT ... SELECT`, not chunked.
@@ -248,3 +248,9 @@ No background worker, no trigger. You control exactly when and how often `proces
 The Vectorizer is the right choice when you want embeddings kept in sync without managing an external Python/Node.js worker -- call `process_queue()` on whatever schedule fits (immediately after a write, or periodically), and it discovers and embeds whatever's eligible at that moment. Note the discovered-on-next-call semantics above: it's not a live trigger, so there's a gap between a write and its embedding appearing, bounded by how often you call `process_queue()`.
 
 If you already have a robust external ETL pipeline, you can skip the Vectorizer and use `fractal_embed()` directly to populate your `DOUBLE[]`/`ARRAY(FLOAT, n)` columns.
+
+**Use unit-length embeddings.** With embeddings of unit length the cosine ordering and the
+L2 ordering of a query are the same, so one index answers both and the ranking does not
+depend on the vector's magnitude. Embeddings that are not unit length -- a raw pooled model
+output, say -- should be normalised once on the way in and stored normalised.
+

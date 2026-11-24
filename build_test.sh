@@ -17,8 +17,8 @@
 #                        cell is built natively under dist/<san>/ (see
 #                        the flags below), plus an instrumentedness probe
 #   02  smoke            fractal_version()/fractal_edition() =
-#                        2.0.0/"Community", fractal_search convergence,
-#                        fractal_search_debug's best_point JSON
+#                        2.0.0/"Community", fractal_sfs_converge convergence,
+#                        fractal_sfs_converge_debug's best_point JSON
 #   03  schema_context   fractal_schema_context(): PK / NOT NULL / FK
 #                        rendering + 0-arg auto-discovery
 #   04  text_to_sql      SELECT-only allowlist end to end: stacked,
@@ -100,7 +100,7 @@
 #                        cleanly (ledger_flush/audit_log), and a
 #                        configured-but-unloadable enterprise LIB
 #                        surfaces the loader error, a distinct message
-#   25  enterprise_stress  [skips without a vendored enterprise core;
+#   25  enterprise_stress  [runs against the real enterprise core when FSQL_TEST_ENTERPRISE_LIB names one, else the mock core;
 #                        see the driver for the in-process concurrency
 #                        and churn scope this port keeps]
 #   26  enterprise_signature  load-boundary ordering: the missing-lib
@@ -125,7 +125,7 @@
 #                        recall_hybrid (pure retrieval, cohort filter,
 #                        no LLM), regime_triage (array-in + dfa/drift
 #                        + reason), and outlier_intercept's metric arg
-#   30  feature_store    [SKIP] -- not implemented in the duckdb build
+#   30  feature_store    covered by gate 66 (store_morphology / mine_topology_negatives)
 #   31  ledger_chain     the ledger's community-vs-enterprise gate
 #                        posture: audit_log/flush/load gated,
 #                        fractal_ledger_verify() runs with NO
@@ -153,7 +153,7 @@
 #                        classification, parameter binding (lists, NULLs, empty lists, large values),
 #                        the lock-down (no file access, no INSTALL/LOAD, settings frozen), interrupt,
 #                        argument coercion, the concurrency caps, secret redaction
-#   36  mcp_smoke        a full MCP session over stdio: handshake, the 96-tool catalog and its
+#   36  mcp_smoke        a full MCP session over stdio: handshake, the 106-tool catalog and its
 #                        annotations, every tool once, the numbers the tools must produce, row
 #                        limits, the error taxonomy, resources, prompts, read-only mode, a database
 #                        file (persisted and opened read-only), $/cancel, shutdown, then the
@@ -323,6 +323,23 @@ set -uo pipefail
 umask 077
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# Resource fence. Run the whole harness inside a transient cgroup scope so no gate (a sanitizer build, the 9-database `multi`
+# lifecycle mode, an OOM sweep) can take the host down: memory is capped (swap off, so it OOM-kills inside the fence instead of
+# thrashing the guest), CPU leaves one core free, and the group sits at low CPU weight. Needs Linux + systemd --user; anywhere
+# else, or with FSQL_NO_CGROUP=1, it is skipped. Tune with FSQL_MEM_MAX (e.g. 3G; default 55% of RAM) and FSQL_CPU_QUOTA
+# (percent of one CPU; default (CPUs-1)*100).
+if [ -z "${FSQL_FENCED:-}" ] && [ "${FSQL_NO_CGROUP:-0}" != 1 ] && [ "$(uname -s)" = Linux ] \
+   && command -v systemd-run >/dev/null 2>&1 && systemctl --user is-system-running >/dev/null 2>&1; then
+  _ncpu="$(nproc 2>/dev/null || echo 1)"
+  _memkb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo)"
+  _mem="${FSQL_MEM_MAX:-$(( _memkb * 55 / 100 / 1024 ))M}"
+  _cpu="${FSQL_CPU_QUOTA:-$(( (_ncpu > 1 ? _ncpu - 1 : 1) * 100 ))%}"
+  case "$_cpu" in *%) ;; *) _cpu="$_cpu%" ;; esac
+  export FSQL_FENCED=1
+  exec systemd-run --user --scope --quiet -p MemoryMax="$_mem" -p MemorySwapMax=0 -p CPUQuota="$_cpu" -p CPUWeight=20 \
+    -p TasksMax=4096 -- "$0" "$@"
+fi
 cd "$HERE"
 # Test fixtures load unsigned mock reasoning plugins; the product default (a valid signature required) is bypassed explicitly here.
 export FSQL_REASONING_REQUIRE_SIGNATURE="${FSQL_REASONING_REQUIRE_SIGNATURE:-0}"
@@ -372,6 +389,41 @@ REVIEWDUMP="$BTROOT/fractalsql_bt_review_env_dump.txt"
 REVIEWTXT="$BTROOT/fractalsql_bt_review.txt"
 REVIEWPROMPT="$BTROOT/fractalsql_bt_review_prompt.txt"
 
+# One run at a time per machine. Those fixture files live at a fixed path and
+# a run removes them when it ends, so a second run overlapping this one
+# deletes this run's canned replies mid-gate -- and the mock plugin answers a
+# valid default when its reply file is gone, which reads like a real answer.
+# The lock is a directory no other run may create; it holds the owner's pid, so
+# a lock left behind by a killed run is taken over rather than waited on. The
+# name is shared with the other hosts that use the same fixture files.
+LOCKDIR="$BTROOT/fractalsql_bt.lock.d"
+LOCK_HELD=0
+acquire_run_lock() {
+  local i p
+  for i in $(seq 1 20); do
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+      printf '%s\n' "$$" > "$LOCKDIR/pid" 2>/dev/null || true
+      printf 'pid %s started %s\n' "$$" "$(date '+%Y-%m-%d %H:%M:%S')" > "$LOCKDIR/owner" 2>/dev/null || true
+      LOCK_HELD=1
+      return 0
+    fi
+    p="$(cat "$LOCKDIR/pid" 2>/dev/null || echo 0)"
+    # ps sees another user's process too (kill -0 does not), and a pid file
+    # that is not written yet reads as 0: neither is a dead owner.
+    if [ "$p" != "0" ] && [ "$p" != "$$" ] && ! ps -p "$p" > /dev/null 2>&1; then
+      rm -rf "$LOCKDIR" 2>/dev/null || true     # the owner is gone: take it over
+      continue
+    fi
+    sleep 1
+  done
+  return 1
+}
+release_run_lock() {
+  [ "$LOCK_HELD" = 1 ] || return 0
+  rm -rf "$LOCKDIR" 2>/dev/null || true
+  LOCK_HELD=0
+}
+
 # Mutable run state.
 PDIR=""       PDIRW=""      PDIRSEP="/"
 EXT=""        EXTW=""
@@ -386,10 +438,11 @@ BADLIB=""
 SAN_MODE=""   SAN_EXEMPT=""
 # What the MCP server (gates 35-43) is built as: asan/ubsan follow SAN_MODE; --tsan builds ONLY the server under
 # ThreadSanitizer, --mcp-coverage ONLY the server with gcov (line, function and branch coverage of mcp/src, gates
-# 35-40). --coverage runs that and then the extension's own sources
-# (src/*.c), as --src-coverage does alone: test/coverage_run.sh, a
-# gcov build of the pure-C extension driven by the gates, the parity corpus, the edge-input matrix, the unit tests,
-# the fuzz corpus and an allocation-failure sweep; it fails below 80% lines, functions or branches.
+# 35-40). --coverage runs that and then the extension's own sources (src/*.c) with test/coverage_run.sh, a gcov build
+# of the pure-C extension. Plain --coverage is the quick pass (build, gates 01-34, the error table and the ledger through
+# SQL, the header unit tests, the report: minutes); --coverage --fault adds the heavy stages (the parity corpus, the
+# edge-input matrix, the lifecycle modes and the allocation-failure sweep). --src-coverage alone always runs every stage
+# (about an hour). Each fails below 80% lines, functions or branches.
 # --profile: valgrind memcheck (test/valgrind_run.sh), Linux only. The unit binaries, then the DuckDB 1.5.x CLI loading the
 # release extension and running every default-environment parity case in one session. Fails on a memcheck error or a
 # definite/indirect leak with a frame in our code; the host's own reports and possible leaks are counted, not failed.
@@ -410,6 +463,7 @@ cleanup() {
   rm -f "${SQLTXT:?bt contract file}" "${EVILTRIG:?bt contract file}" \
         "${RETRYPROMPT:?bt contract file}" "${THINKDUMP:?bt contract file}" \
         "${REVIEWDUMP:?bt contract file}" 2>/dev/null
+  release_run_lock
 }
 trap cleanup EXIT INT TERM
 
@@ -738,6 +792,9 @@ resolve_ext_raw() {
     printf '%s' "$(ls -1t "dist/${SAN_MODE}"/fractalsql.*.duckdb_extension 2>/dev/null | head -1 || true)"
     return
   fi
+  # The build under test the run named itself (a --gate or --coverage cell): it wins over every candidate,
+  # including the newest dist/ artifact, so the resolver-based gates load what this run is actually reporting on.
+  if [ -n "${FSQL_EXT:-}" ] && [ -f "$FSQL_EXT" ]; then printf '%s' "$FSQL_EXT"; return; fi
   # Version-aware first: the extension has two bands (the 1.4 band loads on exactly one DuckDB 1.4.N, the stable band
   # on 1.5.6 and 2.0.0), so "the newest file" can be one the CLI under test refuses to load. Ask the CLI which
   # DuckDB it is, take that version's own cell, else (not for 1.4.x) the stable-band file. A file without the C
@@ -975,9 +1032,9 @@ while [ $# -gt 0 ]; do
     --asan)    [ -z "$SAN_MODE" ] || die "--asan and --ubsan are mutually exclusive"; SAN_MODE="asan" ;;
     --ubsan)   [ -z "$SAN_MODE" ] || die "--asan and --ubsan are mutually exclusive"; SAN_MODE="ubsan" ;;
     --tsan)     MCP_KIND="tsan" ;;
-    --coverage)     MCP_KIND="cov"; COVERAGE_ALL=1 ;;   # everything: MCP server gates, then the extension's sources
+    --coverage)     MCP_KIND="cov"; COVERAGE_ALL=1 ;;   # MCP server gates, then the extension's sources (quick stages; with --fault every stage)
     --mcp-coverage) MCP_KIND="cov" ;;                    # the MCP server only (gates 35-40, a few minutes)
-    --src-coverage) exec "$HERE/test/coverage_run.sh" ;; # the extension's sources only (about an hour)
+    --src-coverage) exec "$HERE/test/coverage_run.sh" ;; # the extension's sources only, every stage (about an hour)
     --profile)      exec "$HERE/test/valgrind_run.sh" ;; # valgrind memcheck over the extension and the MCP server (Linux; about 14 minutes)
     -h|--help) usage; exit 0 ;;
     -*)        usage >&2; die "unknown option: $1" ;;
@@ -1107,19 +1164,19 @@ gate_01() {
 gate_02() {
   local r rc
   r=$(sqlq "SELECT fractal_version();"); rc=$?
-  expect_ok "$rc" "$r" "fractal_version() reports 2.0.1" "2.0.1"
+  expect_ok "$rc" "$r" "fractal_version() reports 2.0.2" "2.0.2"
   r=$(sqlq "SELECT fractal_edition();"); rc=$?
   expect_ok "$rc" "$r" "fractal_edition() reports Community" "Community"
   # smoke search: identical points converge onto the query point itself
-  r=$(sqlq "SELECT fractal_search([0.6, 0.8, 0.0, 0.0]::DOUBLE[], [0.6, 0.8, 0.0, 0.0]::DOUBLE[]);"); rc=$?
+  r=$(sqlq "SELECT fractal_sfs_converge([0.6, 0.8, 0.0, 0.0]::DOUBLE[], [0.6, 0.8, 0.0, 0.0]::DOUBLE[]);"); rc=$?
   if [ "$rc" -eq 0 ] && num_abs_lt_1e6 "$r"; then
-    pass "fractal_search converges on an identical point (|d| < 1e-6)"
+    pass "fractal_sfs_converge converges on an identical point (|d| < 1e-6)"
   else
-    fail "fractal_search convergence smoke"
+    fail "fractal_sfs_converge convergence smoke"
     printf '      got rc=%d: %.900s\n' "$rc" "$r"
   fi
-  r=$(sqlq "SELECT fractal_search_debug([0.6, 0.8, 0.0, 0.0]::DOUBLE[], 30, 50, 2);"); rc=$?
-  expect_ok "$rc" "$r" "fractal_search_debug reports best_point" "best_point"
+  r=$(sqlq "SELECT fractal_sfs_converge_debug([0.6, 0.8, 0.0, 0.0]::DOUBLE[], 30, 50, 2);"); rc=$?
+  expect_ok "$rc" "$r" "fractal_sfs_converge_debug reports best_point" "best_point"
   # The CI smoke test (test/smoke_test.sql) is self-checking: every
   # assertion calls error(), which -bail turns into a non-zero exit.
   # Run the file itself rather than a copy of its checks, so the two
@@ -1492,8 +1549,8 @@ base.execute("DELETE FROM bt_soak")
 def worker(w):
     c = base.cursor()
     for i in range(1, I + 1):
-        got = c.execute("SELECT fractal_search(vec, vec) FROM bt_telemetry WHERE id = 1;").fetchone()
-        assert got is not None, "fractal_search returned no row"
+        got = c.execute("SELECT fractal_sfs_converge(vec, vec) FROM bt_telemetry WHERE id = 1;").fetchone()
+        assert got is not None, "fractal_sfs_converge returned no row"
         c.execute(f"INSERT INTO bt_soak VALUES ({w}, {i}, 'bt-soak')")
     c.close()
 
@@ -1628,6 +1685,30 @@ gate_15() {
   # drop it again, so the later gates' process_queue counts see only
   # the vectorizers they create themselves
   sqlq "SELECT fractal_vectorizer_drop(id) FROM fractal_vectorizers WHERE source_table = 'main.bt_vsq';" >/dev/null 2>&1
+  # the vectorizer option index_ensure: after a batch an existing index on the embedding column is brought up to date; a control
+  # vectorizer without the option leaves its index stale
+  r=$(sqlq_env "${embenv[@]}" -- \
+      "CREATE TABLE bt_vix(id INTEGER PRIMARY KEY, body TEXT, emb DOUBLE[]);" \
+      "CREATE TABLE bt_vix2(id INTEGER PRIMARY KEY, body TEXT, emb DOUBLE[]);" \
+      "INSERT INTO bt_vix SELECT i, 'text ' || i, NULL FROM range(1, 31) t(i);" \
+      "INSERT INTO bt_vix2 SELECT i, 'text ' || i, NULL FROM range(1, 31) t(i);" \
+      "SELECT fractal_vectorizer_create('bt_vix','id','body','emb','{\"index_ensure\":true}');" \
+      "SELECT fractal_vectorizer_create('bt_vix2','body','emb');" \
+      "SELECT fractal_vectorizer_process_queue(100);" \
+      "SELECT json_extract(fractal_index_ensure('bt_vix','emb','{\"name\":\"bt_vix_ix\",\"id_col\":\"id\",\"vector_format\":\"FP32\",\"nlist\":2}'),'\$.action');" \
+      "SELECT json_extract(fractal_index_ensure('bt_vix2','emb','{\"name\":\"bt_vix2_ix\",\"id_col\":\"id\",\"vector_format\":\"FP32\",\"nlist\":2}'),'\$.action');" \
+      "INSERT INTO bt_vix VALUES (101,'new a',NULL),(102,'new b',NULL);" \
+      "INSERT INTO bt_vix2 VALUES (101,'new a',NULL),(102,'new b',NULL);" \
+      "SELECT fractal_vectorizer_process_queue(100);" \
+      "SELECT 'S1=' || json_extract_string(fractal_index_info('bt_vix_ix'),'\$.status') || '/' || json_extract_string(fractal_index_info('bt_vix_ix'),'\$.rows_added_since_build');" \
+      "SELECT 'S2=' || json_extract_string(fractal_index_info('bt_vix2_ix'),'\$.status') || '/' || json_extract_string(fractal_index_info('bt_vix2_ix'),'\$.rows_added_since_build');")
+  if printf '%s' "$r" | grep -qF "S1=ready/0" && printf '%s' "$r" | grep -qF "S2=stale/2"; then
+    pass "a vectorizer with index_ensure folds the batch's new rows into its index (ready); one without leaves it stale"
+  else
+    fail "index_ensure hook: got '$r'"
+  fi
+  sqlq "SELECT fractal_vectorizer_drop(id) FROM fractal_vectorizers WHERE source_table IN ('bt_vix','bt_vix2');" >/dev/null 2>&1
+  sqlq "SELECT fractal_index_drop('bt_vix_ix'); SELECT fractal_index_drop('bt_vix2_ix'); DROP TABLE bt_vix; DROP TABLE bt_vix2;" >/dev/null 2>&1
   # an unconfigured embed endpoint: every row fails cleanly, and a
   # failed row still counts as processed (it reached the end of its
   # attempt; leaving it out of the count would make a permanently
@@ -1828,11 +1909,11 @@ gate_18() {
 }
 gate_19() {
   local r rc big
-  r=$(sqlq "SELECT fractal_search([]::DOUBLE[], []::DOUBLE[]);"); rc=$?
+  r=$(sqlq "SELECT fractal_sfs_converge([]::DOUBLE[], []::DOUBLE[]);"); rc=$?
   expect_err "query dim 0 out of range [1, 4096]" "$rc" "$r" "empty query vector rejected at the dim bound"
   # over-arena: a constant 4097-element list (one over the cap)
   big="$(awk 'BEGIN{for(i=0;i<4097;i++) printf "%s0.1", (i?",":"")}')"
-  r=$(sqlq "SELECT fractal_search([$big]::DOUBLE[], [$big]::DOUBLE[]);"); rc=$?
+  r=$(sqlq "SELECT fractal_sfs_converge([$big]::DOUBLE[], [$big]::DOUBLE[]);"); rc=$?
   expect_err "out of range [1, 4096]" "$rc" "$r" "4097-dim query rejected at the vector cap"
   r=$(sqlq "SELECT particle FROM fractal_search_explore('bt_explore','embedding',[0.5, 0.5]::DOUBLE[], NULL);"); rc=$?
   expect_err "does not match bt_explore.embedding" "$rc" "$r" "explore dim mismatch names the table.column it checked"
@@ -2326,6 +2407,8 @@ gate_22() {
     fail "periodogram"
     printf '      got rc=%d: %.900s\n' "$rc" "$r"
   fi
+  r=$(sqlq "SELECT string_agg(column_name, ',') FROM (DESCRIBE SELECT * FROM fractal_periodogram([$s]::DOUBLE[], 3));"); rc=$?
+  expect_ok "$rc" "$r" "periodogram columns are named freq and power" "freq,power"
   # -- fractal_spectrogram_entropy: short-time spectral entropy, a plain
   # DOUBLE[] (a period-8 tone, 64 samples, window 16 / hop 8 -> 7 frames) --
   local tone="[sin(2 * pi() * t / 8.0) for t in range(0, 64)]"
@@ -2443,6 +2526,19 @@ gate_22() {
   r=$(sqlq "SELECT fractal_detect_collapse();")
   rc=$?
   expect_ok "$rc" "$r" "detect_collapse responds" "nan"
+  # ...but the telemetry search of the SAME connection feeds the diversify monitor: after a warm window of searches on a
+  # connection with diversify on, the diversity quotient is a real number (it was NaN while every search ran on a private context)
+  local dq_sql="CREATE OR REPLACE TABLE dq_t AS SELECT i AS id, [(i*7%97)/97.0, (i*13%89)/89.0, (i*5%83)/83.0]::DOUBLE[] AS emb FROM range(1,60) t(i); SELECT fractal_diversify_enable(); SELECT fractal_diversify_set_params(8, NULL, 0.3, 0.5);" dq_g
+  for dq_g in 0 1 2 3 4 5 6 7 8 9; do
+    dq_sql+=" SELECT count(*) FROM fractal_search_telemetry('dq_t','emb',[$(awk -v g=$dq_g 'BEGIN{printf "%.2f,%.2f,%.2f", 0.9-g*0.05, 0.5+g*0.05, (g-3)*0.1}')]::float8[],3);"
+  done
+  r=$(sqlq "$dq_sql SELECT fractal_detect_collapse(); DROP TABLE dq_t;"); rc=$?
+  dq_g="$(printf '%s\n' "$r" | grep -v '^true$' | tail -1)"
+  if [ "$rc" -eq 0 ] && [[ "$dq_g" =~ ^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ ]]; then
+    pass "22 vector_api: detect_collapse is a real number after a warm window of telemetry searches on a diversify-enabled connection ($dq_g)"
+  else
+    fail "22 vector_api: detect_collapse after warm telemetry searches was '$dq_g' (rc=$rc)"
+  fi
   # -- vector math --
   r=$(sqlq "SELECT fractal_vector_lp_distance([1.0, 0.0, 0.0]::FLOAT[], [0.5, 0.0, 0.0]::FLOAT[], 2.0);"); rc=$?
   expect_ok "$rc" "$r" "lp distance p=2 reports the half-step" "0.5"
@@ -2466,6 +2562,11 @@ gate_22() {
 }
 
 gate_23() {
+  # the settings table in the reasoning-setup guide names every configuration key this build defines
+  if command -v python3 >/dev/null 2>&1; then
+    local dcout; dcout="$(python3 -I "$HERE/test/check_config_docs.py" "$HERE" 2>&1)" \
+      && pass "23 agents: ${dcout#check_config_docs: }" || fail "23 agents: ${dcout#check_config_docs: }"
+  else skip "23 agents: the settings-table check needs python3"; fi
   local r rc n
   local embenv=("FRACTALSQL_REASONING_PLUGIN=$(pj mock_embed_plugin)" \
                 "FSQL_REASONING_HTTP_EMBED_URL=https://embed.invalid/v1/embeddings")
@@ -2483,7 +2584,7 @@ gate_23() {
   # search_agent: embed (mock), scan, answer (chat mock) -- the shape is
   # everything, the content is canned
   r=$(sqlq_env "${embenv[@]}" -- \
-      "SELECT (answer IS NOT NULL) AND (len(source_doc_ids) >= 1) FROM fractal_search_agent('near doc-1','bt_agent_docs','emb',50,30);")
+      "SELECT (answer IS NOT NULL) AND (len(source_row_ids) >= 1) FROM fractal_search_agent('near doc-1','bt_agent_docs','emb',50,30);")
   rc=$?
   expect_ok "$rc" "$r" "search_agent embeds, scans, and answers with doc ids" "true"
   # rag_agent: same pipeline minus the answer synthesis
@@ -2491,6 +2592,67 @@ gate_23() {
       "SELECT (answer IS NOT NULL) FROM fractal_rag_agent('near doc-1','bt_agent_docs','emb','{}');")
   rc=$?
   expect_ok "$rc" "$r" "rag_agent returns an answer row" "true"
+  # retrieval: meta_filter, row ids, the index path (agent_use_index off/on/auto), the context budget, fractal_index_ensure
+  r=$(sqlq_env "${embenv[@]}" -- "SELECT json_extract(fractal_index_ensure('bt_agent_docs','emb','{\"name\":\"bt_agent_ix\",\"id_col\":\"id\",\"vector_format\":\"FP32\",\"nlist\":2}'),'\$.action');"); rc=$?
+  expect_ok "$rc" "$r" "ensure builds the index when there is none (created)" '"created"'
+  r=$(sqlq "SELECT json_extract(fractal_index_ensure('bt_agent_docs','emb'),'\$.action');"); rc=$?
+  expect_ok "$rc" "$r" "ensure on a fit index changes nothing (unchanged)" '"unchanged"'
+  r=$(sqlq "INSERT INTO bt_agent_docs VALUES (6, 'doc-6', 'doc-f late arrival', [0.9, 0.2, 0.0]);" "SELECT json_extract(fractal_index_ensure('bt_agent_docs','emb'),'\$.action');"); rc=$?
+  expect_ok "$rc" "$r" "ensure folds in a few added rows (refreshed)" '"refreshed"'
+  r=$(sqlq "INSERT INTO bt_agent_docs SELECT 100 + i, 'doc-x', 'extra ' || i, [0.3, 0.3, 0.9]::DOUBLE[] FROM range(10) t(i);" "SELECT json_extract(fractal_index_ensure('bt_agent_docs','emb'),'\$.action');"); rc=$?
+  expect_ok "$rc" "$r" "ensure rebuilds after more than a quarter of the rows were added (rebuilt)" '"rebuilt"'
+  r=$(sqlq_env "${embenv[@]}" -- "SELECT used_index FROM fractal_rag_agent('near doc-1','bt_agent_docs','emb','{}');"); rc=$?
+  expect_ok "$rc" "$r" "rag_agent scans by default (used_index false)" "false"
+  r=$(sqlq_env "${embenv[@]}" -- "SELECT fractal_config_set('agent_use_index','on');" "SELECT used_index FROM fractal_rag_agent('near doc-1','bt_agent_docs','emb','{}');" | tail -1); rc=$?
+  expect_ok "$rc" "$r" "agent_use_index on sends rag_agent through the index (used_index true)" "true"
+  # plan_explore through the index: the nearest rows from the index, each branch_id still the row's position in the full scan
+  PEQ="SELECT count(*) || '/' || count(*) FILTER (WHERE abs(b.plan_trajectory[1] - s.emb[1]) < 0.000001) FROM fractal_agent_plan_explore('near doc-1','bt_agent_docs','emb',3) b JOIN (SELECT emb, row_number() OVER () - 1 AS pos FROM bt_agent_docs) s ON s.pos = b.branch_id;"
+  r=$(sqlq_env "${embenv[@]}" -- "$PEQ" | tail -1); rc=$?
+  expect_ok "$rc" "$r" "plan_explore scans by default and each branch_id is the row's position with its own vector" "3/3"
+  r=$(sqlq_env "${embenv[@]}" -- "SELECT fractal_config_set('agent_use_index','on');" "$PEQ" "SELECT json_extract(fractal_index_info('bt_agent_ix'),'\$.last_search.used_index');" | tr '\n' ' '); rc=$?
+  if printf '%s' "$r" | grep -qF "3/3" && printf '%s' "$r" | grep -qF "true"; then
+    pass "plan_explore with agent_use_index on finds its branches through the index (ids are still full-scan positions)"
+  else
+    fail "plan_explore through the index: got '$r'"
+  fi
+  r=$(sqlq_env "${embenv[@]}" -- "SELECT fractal_config_set('agent_use_index','auto');" "SELECT used_index FROM fractal_rag_agent('near doc-1','bt_agent_docs','emb','{}');" "SELECT fractal_config_set('agent_index_min_rows','5');" "SELECT used_index FROM fractal_rag_agent('near doc-1','bt_agent_docs','emb','{}');" | grep -E '^(true|false)$' | tr '\n' ' '); rc=$?
+  expect_ok "$rc" "$r" "auto scans a small table and uses the ready index once the table reaches agent_index_min_rows" "false true "
+  r=$(sqlq "SELECT fractal_config_set('agent_use_index','sometimes');"); rc=$?
+  expect_err "must be one of: off, on, auto" "$rc" "$r" "agent_use_index refuses a value that is not off, on or auto"
+  r=$(sqlq "SELECT fractal_config_set('text_to_sql_allowed_statements','select_insert_update');" "SELECT fractal_config_get('text_to_sql_allowed_statements');" "SELECT fractal_config_set('text_to_sql_use_review','on');" "SELECT fractal_config_get('text_to_sql_use_review');" | tr '\n' ' '); rc=$?
+  expect_ok "$rc" "$r" "the text-to-SQL keys are settable and read back" "true select_insert_update true 1"
+  r=$(sqlq "SELECT fractal_config_keys() LIKE '%{\"name\":\"agent_use_index\",\"type\":\"enum\",\"session_overridable\":true}%' AND fractal_config_keys() LIKE '%{\"name\":\"http_num_ctx\",\"type\":\"int\",%';"); rc=$?
+  expect_ok "$rc" "$r" "fractal_config_keys lists each key with its type and session scope" "true"
+  r=$(sqlq "SELECT fractal_config_set('text_to_sql_allowed_statements','delete');"); rc=$?
+  expect_err "must be one of: select, select_insert_update" "$rc" "$r" "text_to_sql_allowed_statements refuses a value outside its choices"
+  r=$(sqlq "SELECT fractal_config_set('text_to_sql_use_review','maybe');"); rc=$?
+  expect_err "must be one of: on, off" "$rc" "$r" "text_to_sql_use_review refuses a value that is not on or off"
+  r=$(sqlq "SELECT fractal_config_set('enterprise_require_signature','on');" "SELECT fractal_config_get('enterprise_require_signature');" | tr '\n' ' '); rc=$?
+  expect_ok "$rc" "$r" "enterprise_require_signature can be turned on from SQL" "true 1"
+  r=$(sqlq "SELECT fractal_config_set('enterprise_require_signature','off');"); rc=$?
+  expect_err "can only be turned on from SQL" "$rc" "$r" "enterprise_require_signature cannot be turned off from SQL (an operator setting)"
+  r=$(sqlq_env "${embenv[@]}" -- "SELECT list_sort(source_row_ids) = (SELECT list_sort(list(rowid)) FROM bt_agent_docs WHERE tag = 'doc-3') FROM fractal_rag_agent('near doc-3','bt_agent_docs','emb','{\"tag\":\"doc-3\"}');"); rc=$?
+  expect_ok "$rc" "$r" "meta_filter limits the scan to the matching rows, and source_row_ids are their row ids" "true"
+  r=$(sqlq_env "${embenv[@]}" -- "SELECT fractal_config_set('agent_use_index','on');" "SELECT list_sort(source_row_ids) = (SELECT list_sort(list(rowid)) FROM bt_agent_docs WHERE tag = 'doc-3') AND used_index FROM fractal_rag_agent('near doc-3','bt_agent_docs','emb','{\"tag\":\"doc-3\"}');" | tail -1); rc=$?
+  expect_ok "$rc" "$r" "meta_filter through the index passes the matching keys as the ids option, same rows" "true"
+  r=$(sqlq_env "${embenv[@]}" -- "SELECT * FROM fractal_rag_agent('q','bt_agent_docs','emb','{\"nosuch\":1}');"); rc=$?
+  expect_err "nosuch" "$rc" "$r" "a meta_filter column the table does not have is an error"
+  r=$(sqlq_env "${embenv[@]}" -- "SELECT * FROM fractal_rag_agent('q','bt_agent_docs','emb','{\"tag\":\"nope\"}');"); rc=$?
+  expect_err "for that meta_filter" "$rc" "$r" "a meta_filter that matches no row is an error, never ignored"
+  r=$(sqlq_env "${embenv[@]}" -- "SELECT * FROM fractal_rag_agent('q','bt_agent_docs','emb','[1]');"); rc=$?
+  expect_err "meta_filter must be a JSON object" "$rc" "$r" "a meta_filter that is not an object is an error"
+  r=$(sqlq_env "${embenv[@]}" -- "SELECT fractal_config_set('agent_context_row_bytes','5');" "SELECT json_extract(context_cut,'\$.cells')::INT > 0 AND execution_time_ms >= 0 FROM fractal_search_agent('near doc-1','bt_agent_docs','emb',10,5, meta_filter := '{\"tag\":\"doc-1\"}');" | tail -1); rc=$?
+  expect_ok "$rc" "$r" "a text cell over agent_context_row_bytes is cut and counted; search_agent takes a named meta_filter and reports a measured time" "true"
+  r=$(sqlq "SELECT fractal_chunk_text('abcdefghij', 4, 1, 'fixed');"); rc=$?
+  expect_ok "$rc" "$r" "chunk_text fixed, size 4, overlap 1" '[{"no":0,"start":0,"end":4,"text":"abcd"},{"no":1,"start":3,"end":7,"text":"defg"},{"no":2,"start":6,"end":10,"text":"ghij"}]'
+  r=$(sqlq "SELECT string_agg(json_extract_string(e,'\$.start') || '-' || json_extract_string(e,'\$.end') || ':' || json_extract_string(e,'\$.text'), '|') FROM (SELECT unnest(from_json(fractal_chunk_text('One. Two sentences! Is this three? Yes.  Four is a long one that keeps on going and going.', 30, 5, 'sentence'), '[\"JSON\"]')) AS e);"); rc=$?
+  expect_ok "$rc" "$r" "chunk_text sentence packing, a long sentence split with overlap" "0-19:One. Two sentences!|20-39:Is this three? Yes.|41-71:Four is a long one that keeps |66-90:eeps on going and going."
+  r=$(sqlq "SELECT fractal_chunk_text('', 10, 0), fractal_chunk_text(NULL, 10, 0) IS NULL;"); rc=$?
+  expect_ok "$rc" "$r" "chunk_text of empty text is [] and of NULL is NULL" "[]"
+  r=$(sqlq "SELECT fractal_chunk_text('x', 5, 5);"); rc=$?
+  expect_err "overlap must be 0..size-1" "$rc" "$r" "chunk_text refuses an overlap of size or more"
+  r=$(sqlq "SELECT fractal_chunk_text('x', 5, 0, 'word');"); rc=$?
+  expect_err "mode must be one of: fixed, paragraph, sentence" "$rc" "$r" "chunk_text refuses an unknown mode"
   # sql_agent: never executes under auto_execute=false, reports the
   # pipeline status per row
   printf 'SELECT count(*) FROM bt_agent_docs\n' > "$SQLTXT"
@@ -2600,9 +2762,13 @@ gate_25() {
     skip "python driver gate: the pip-duckdb host process cannot be instrumented (skipped in ${SAN_MODE} mode)"
     return
   fi
-  if [ -z "${FSQL_TEST_ENTERPRISE_LIB:-}" ] || [ ! -f "$FSQL_TEST_ENTERPRISE_LIB" ]; then
-    skip "no enterprise core configured for stress (set FSQL_TEST_ENTERPRISE_LIB to a compiled enterprise core library)"
-    return
+  # the real core when FSQL_TEST_ENTERPRISE_LIB names it, otherwise the mock core (test/mock_enterprise.c)
+  local ent25="${FSQL_TEST_ENTERPRISE_LIB:-}"
+  if [ -z "$ent25" ] || [ ! -f "$ent25" ]; then
+    if ! command -v cc >/dev/null 2>&1 || ! cc -shared -fPIC -std=c99 -I"$HERE/include" "$HERE/test/mock_enterprise.c" -o "$PDIR/gate25_mock_enterprise$PLUGSUF" 2>/dev/null; then
+      fail "25 enterprise_stress: the mock enterprise core did not build (set FSQL_TEST_ENTERPRISE_LIB to use the real one)"; return
+    fi
+    ent25="$PDIR/gate25_mock_enterprise$PLUGSUF"
   fi
   if [ -z "$PY" ]; then
     skip "python with the pip duckdb package is unavailable (set FSQL_PYTHON)"
@@ -2614,7 +2780,7 @@ gate_25() {
   fi
   cat > "$PDIR/gate25.py" <<'PYEOF'
 import concurrent.futures as cf
-import duckdb, os, sys
+import duckdb, json, os, sys
 
 db  = os.environ["FSQL_BT_DB"]
 ext = os.environ["FSQL_BT_EXT"].replace("'", "''")
@@ -2625,9 +2791,20 @@ cfg = {"allow_unsigned_extensions": "true", "threads": "1"}
 con = duckdb.connect(db, config=cfg)
 con.execute(f"LOAD '{ext}'")
 
-# verify() must run with the core loaded and keep its exact contract
+def verified(v):
+    """The verify verdict: the document parses and says ok."""
+    try:
+        d = json.loads(str(v))
+    except Exception:
+        return False
+    return isinstance(d, dict) and d.get("ok") is True
+
+# verify() must run with the core loaded and keep its exact contract. The
+# extension's documented form is compact -- {"ok":true,"rows_verified":N}
+# (src/fsql_ledger_store.h) -- so the check parses the document instead of
+# matching a spelling.
 v = con.execute("SELECT fractal_ledger_verify();").fetchone()[0]
-assert str(v).startswith('{"ok": true'), f"verify contract changed: {v!r}"
+assert verified(v), f"verify contract changed: {v!r}"
 
 # with the core loaded the persistence actions stop gating
 for sql in ("SELECT fractal_ledger_flush();",
@@ -2652,7 +2829,7 @@ with cf.ThreadPoolExecutor(max_workers=4) as ex:
     list(ex.map(churn, range(4)))
 
 v = con.execute("SELECT fractal_ledger_verify();").fetchone()[0]
-assert str(v).startswith('{"ok": true'), f"verify broke after churn: {v!r}"
+assert verified(v), f"verify broke after churn: {v!r}"
 print("gate-25-ok")
 # The extension's own contract: "Call [fractal_release()] as the last
 # statement of a session that is about to close a file database." It closes
@@ -2666,7 +2843,7 @@ except Exception:
     pass
 PYEOF
   local r rc
-  r=$(py_run "$PDIR/gate25.py"); rc=$?
+  r=$(FSQL_TEST_ENTERPRISE_LIB="$ent25" py_run "$PDIR/gate25.py"); rc=$?
   expect_ok "$rc" "$r" "enterprise core absorbed the in-process churn (verify contract intact)" "gate-25-ok"
 }
 
@@ -2903,8 +3080,8 @@ gate_29() {
 }
 
 gate_30() {
-  # the feature-store surface never made it into the duckdb build
-  skip "feature store is not implemented in the duckdb build"
+  # the feature-store surface is exercised by gate 66
+  skip "feature store: see gate 66"
 }
 
 gate_31() {
@@ -3183,9 +3360,19 @@ oom_gate() {   # oom_gate NUM LABEL ENV...
     elif [ -x /opt/homebrew/opt/coreutils/libexec/gnubin/timeout ]; then tmo="/opt/homebrew/opt/coreutils/libexec/gnubin/timeout --kill-after=10 $budget"; fi
   fi
   # Run against a tmp copy of the built extensions so no sweep process touches the shared working copy (same reason gate 54's
-  # scratch is in tmp). CAPI_DIST is the harness's switch for the build under test.
-  local srcdist stage
-  srcdist="$(dirname "$(ls "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension | head -1)")"
+  # scratch is in tmp). CAPI_DIST is the harness's switch for the build under test. The sweep's band_file looks for the
+  # band of $OOM_LINE in one directory, and a release tree keeps the bands apart: build.sh's dist/<arch>/ holds only the
+  # per-DuckDB-version copies of the stable band, no `.capi` file, so the staging source is the newest directory that
+  # actually holds what the sweep will load (the check above has built it for us when it was missing), not
+  # dirname(resolve_ext), whose per-version name wins the resolver from the older Docker cell.
+  local srcdist stage band oline="${OOM_LINE:-15}"
+  local reserved='^dist/(asan|ubsan|san-[a-z]+|cov|unit|lifecycle|windows[^/]*)/'
+  if [ "$oline" = 14 ]; then
+    band="$(ls -1t "$HERE"/dist/*/fractalsql.v1.4.*.duckdb_extension 2>/dev/null | grep -vE "$reserved" | head -1 || true)"
+  else
+    band="$(ls -1t "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension 2>/dev/null | grep -vE "$reserved" | head -1 || true)"
+  fi
+  if [ -n "$band" ]; then srcdist="$(dirname "$band")"; else srcdist="$(dirname "$(resolve_ext)")"; fi
   stage="$(mktemp -d "${TMPDIR:-/tmp}/fsql_oomdist_XXXXXX")" && cp "$srcdist"/*.duckdb_extension "$stage"/ || { fail "$num $label: could not stage the extension in tmp"; return; }
   out="$(env -u LD_PRELOAD CAPI_DIST="$stage" "$@" $tmo nice python3 -I "$HERE/test/oom_sweep.py" 2>&1)"; rc=$?
   rm -rf "$stage"
@@ -3556,8 +3743,29 @@ gate_37() {
   mcp_driver_gate 37 https mcp_https_smoke_client.py MCP_HTTPS_PORT="$port" MCP_HTTPS_CERT="$w/cert.pem" MCP_HTTPS_KEY="$w/key.pem"
 }
 gate_38() { mcp_driver_gate 38 cli mcp_cli.py; }
-# SECURITY_AUDIT.md 3.17, 3.18: the HTTP transport refuses lookalike origins and repeated headers (no engine needed)
+# The HTTP transport refuses lookalike origins and repeated headers (no engine needed)
 gate_58() { mcp_driver_gate 58 audit_http mcp_audit_http.py; }
+
+# 59 audit_regress: test/audit_regress.py, the security regressions reachable from SQL. DK-01: the reasoning plugin path is copied
+# into a bounded buffer before the tier environment is rewritten (an over-long path is a clean error); DK-02: an unreadable .sig is refused;
+# DK-05: fractal_vectorizer_create outside 3 to 5 arguments is a bind error.
+gate_59() {
+  if [ ! -f "$HERE/test/audit_regress.py" ]; then skip "59 audit_regress (no test/audit_regress.py)"; return; fi
+  if ! command -v python3 >/dev/null 2>&1; then skip "59 audit_regress (needs python3)"; return; fi
+  if ! ls "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension >/dev/null 2>&1; then
+    if ! nice make -C "$HERE" -s >/dev/null 2>&1; then fail "59 audit_regress: the extension did not build"; return; fi
+  fi
+  local out rc line
+  out="$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES -u ASAN_OPTIONS -u UBSAN_OPTIONS nice python3 -I "$HERE/test/audit_regress.py" 2>&1)"; rc=$?
+  line="$(grep -E '^audit_regress: ' <<< "$out" | tail -1)"
+  if [ "$rc" -eq 0 ] && [ -n "$line" ]; then
+    pass "59 audit_regress: ${line#audit_regress: }"
+  else
+    grep -E '^  FAIL' <<< "$out" | head -10 | sed 's/^/    /' >&2
+    fail "59 audit_regress: ${line:-the driver did not finish} (run test/audit_regress.py)"
+  fi
+}
+
 
 # 46 capi_matrix: the pure-C extension. It builds and checks its own files, not the artifact the other
 # gates locate. See test/load_matrix.sh for the
@@ -3622,7 +3830,12 @@ gate_49() {
     if ! nice make -C "$HERE" -s >/dev/null 2>&1; then fail "49 capi_lifecycle: the extension did not build"; return; fi
   fi
   local out rc np nf ns
-  out="$(CAPI_DIST="${CAPI_DIST:-}" "$HERE/test/lifecycle_run.sh" 2>&1)"; rc=$?
+  # The 2.x one-shot CLI variant hits a documented teardown race: the process
+  # exits within milliseconds of closing its database and touching libduckdb
+  # during teardown is not safe (the script's own comment, and the flag it
+  # already carries for exactly this). The "release" and "off" variants still
+  # cover the 2.x line, so the plain one is skipped rather than failed.
+  out="$(LIFECYCLE_SKIP_PLAIN=1 CAPI_DIST="${CAPI_DIST:-}" "$HERE/test/lifecycle_run.sh" 2>&1)"; rc=$?
   np="$(grep -c '^  PASS ' <<< "$out")"; nf="$(grep -c '^  FAIL ' <<< "$out")"; ns="$(grep -c '^  SKIP ' <<< "$out")"
   grep -E '^  FAIL ' <<< "$out" | head -10 | sed 's/^/    /' >&2
   grep -E '^  SKIP ' <<< "$out" | sed 's/^/    /' >&2
@@ -3710,6 +3923,352 @@ gate_title() {
   printf '\n== Gate %s: %s\n' "$1" "$2"
 }
 
+# 60 precision: test/test_precision.py -- the precision contract (R2, R3, R5, R7, R8): the rename, the ONE cosine,
+# the double accumulation, and the build flags.
+gate_60() {
+  if [ ! -f "$HERE/test/test_precision.py" ]; then skip "60 precision (no test/test_precision.py)"; return; fi
+  if ! command -v python3 >/dev/null 2>&1; then skip "60 precision (needs python3)"; return; fi
+  if ! ls "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension >/dev/null 2>&1; then
+    if ! nice make -C "$HERE" -s >/dev/null 2>&1; then fail "60 precision: the extension did not build"; return; fi
+  fi
+  local out rc line
+  out="$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES -u ASAN_OPTIONS -u UBSAN_OPTIONS nice python3 -I "$HERE/test/test_precision.py" 2>&1)"; rc=$?
+  line="$(grep -E '^precision: ' <<< "$out" | tail -1)"
+  if [ "$rc" -eq 0 ] && [ -n "$line" ]; then
+    pass "60 precision: ${line#precision: }"
+  else
+    grep -E '^  FAIL' <<< "$out" | head -20 | sed 's/^/    /' >&2
+    fail "60 precision: ${line:-the checks did not finish} (run test/test_precision.py)"
+  fi
+}
+
+# 61 index: test/test_index.py -- the native IVF index: the SQL surface, the exact verified distances, the delta, and the
+# proof that the index was ACTUALLY USED (the rows it scanned are far below the table's row count).
+gate_61() {
+  if [ ! -f "$HERE/test/test_index.py" ]; then skip "61 index (no test/test_index.py)"; return; fi
+  if ! command -v python3 >/dev/null 2>&1; then skip "61 index (needs python3)"; return; fi
+  if ! ls "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension >/dev/null 2>&1; then
+    if ! nice make -C "$HERE" -s >/dev/null 2>&1; then fail "61 index: the extension did not build"; return; fi
+  fi
+  # A sanitizer cell (like gate 48): the driver runs the instrumented build (CAPI_SAN selects dist/<san>/ and
+  # folds the runtime into every CLI call), so the SAN-instrumented mock reasoning plugin this gate hands the
+  # agents joins the resident runtime instead of loading into an uninstrumented CLI.
+  local out rc line san=""
+  [ "$SAN_MODE" = asan ] && san="address"
+  [ "$SAN_MODE" = ubsan ] && san="undefined"
+  out="$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES -u ASAN_OPTIONS -u UBSAN_OPTIONS CAPI_SAN="$san" FSQL_TEST_MOCK_REASONING="${MOCK:-}" nice python3 -I "$HERE/test/test_index.py" 2>&1)"; rc=$?
+  line="$(grep -E '^index: ' <<< "$out" | tail -1)"
+  if grep -qE '^index: SKIPPED' <<< "$out"; then
+    skip "61 index: ${out#index: SKIPPED -- }"
+    return
+  fi
+  if [ "$rc" -eq 0 ] && [ -n "$line" ]; then
+    pass "61 index: ${line#index: }"
+  else
+    grep -E '^  FAIL' <<< "$out" | head -20 | sed 's/^/    /' >&2
+    fail "61 index: ${line:-the checks did not finish} (run test/test_index.py)"
+  fi
+}
+
+# 63 enterprise_core: test/test_enterprise_core.py -- the extension with an enterprise core library: the REAL one when FSQL_TEST_ENTERPRISE_LIB
+# names it (an absolute path to libfractalsql-enterprise-*-c with its .sig beside it), otherwise the mock core: the gated functions are live, the audit chain verifies, a flush
+# is restored by a load, both retention modes reach the core, the signature is checked, and the retrieval features (index ensure,
+# agent_use_index, recall_hybrid) work with the enterprise tier active. The Pareto and signature checks need the real library and run only with it.
+gate_63() {
+  if [ ! -f "$HERE/test/test_enterprise_core.py" ]; then skip "63 enterprise_core (no test/test_enterprise_core.py)"; return; fi
+  if ! command -v python3 >/dev/null 2>&1; then skip "63 enterprise_core (needs python3)"; return; fi
+  if ! ls "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension >/dev/null 2>&1; then
+    if ! nice make -C "$HERE" -s >/dev/null 2>&1; then fail "63 enterprise_core: the extension did not build"; return; fi
+  fi
+  local out rc line
+  out="$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES -u ASAN_OPTIONS -u UBSAN_OPTIONS nice python3 -I "$HERE/test/test_enterprise_core.py" 2>&1)"; rc=$?
+  line="$(grep -E '^enterprise core: ' <<< "$out" | tail -1)"
+  if [ "$rc" -eq 0 ] && [ -n "$line" ]; then
+    pass "63 enterprise_core: ${line#enterprise core: } (audit chain, flush and load, retention, latch, index ensure and recall_hybrid; Pareto and signature with the real library)"
+  else
+    grep -E '^  FAIL' <<< "$out" | head -20 | sed 's/^/    /' >&2
+    fail "63 enterprise_core: ${line:-the checks did not finish} (run test/test_enterprise_core.py)"
+  fi
+}
+
+# 64 unicode: test/test_unicode.py -- accented Latin, CJK, right-to-left text, emoji and combining marks through fractal_chunk_text and a table
+# round trip: one chunk is the whole text, offsets are character offsets, the chunks join back, the JSON is strict UTF-8.
+gate_64() {
+  if [ ! -f "$HERE/test/test_unicode.py" ]; then skip "64 unicode (no test/test_unicode.py)"; return; fi
+  if ! command -v python3 >/dev/null 2>&1; then skip "64 unicode (needs python3)"; return; fi
+  if ! ls "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension >/dev/null 2>&1; then
+    if ! nice make -C "$HERE" -s >/dev/null 2>&1; then fail "64 unicode: the extension did not build"; return; fi
+  fi
+  local out rc line
+  out="$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES -u ASAN_OPTIONS -u UBSAN_OPTIONS nice python3 -I "$HERE/test/test_unicode.py" 2>&1)"; rc=$?
+  line="$(grep -E '^unicode: ' <<< "$out" | tail -1)"
+  if [ "$rc" -eq 0 ] && [ -n "$line" ]; then
+    pass "64 unicode: ${line#unicode: } (Latin, CJK, right-to-left, emoji, combining marks, JSON-special characters)"
+  else
+    grep -E '^  FAIL' <<< "$out" | head -20 | sed 's/^/    /' >&2
+    fail "64 unicode: ${line:-the checks did not finish} (run test/test_unicode.py)"
+  fi
+}
+
+# 65 partial_reasoning: test/test_partial_reasoning.py -- agent_partial_reasoning_fail. Off (the default) an agent raises when its reasoning step
+# fails; on, search_agent / rag_agent and the domain agents keep their computed half and report reasoning_step_failed. A local HTTP stub answers
+# embeddings and fails every chat call, through the vendored http plugin.
+gate_65() {
+  if [ ! -f "$HERE/test/test_partial_reasoning.py" ]; then skip "65 partial_reasoning (no test/test_partial_reasoning.py)"; return; fi
+  if ! command -v python3 >/dev/null 2>&1; then skip "65 partial_reasoning (needs python3)"; return; fi
+  if ! ls "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension >/dev/null 2>&1; then
+    if ! nice make -C "$HERE" -s >/dev/null 2>&1; then fail "65 partial_reasoning: the extension did not build"; return; fi
+  fi
+  local out rc line
+  out="$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES -u ASAN_OPTIONS -u UBSAN_OPTIONS nice python3 -I "$HERE/test/test_partial_reasoning.py" 2>&1)"; rc=$?
+  if grep -q '^  SKIP' <<< "$out"; then skip "65 partial_reasoning: $(grep '^  SKIP' <<< "$out" | head -1 | sed 's/^  SKIP //')"; return; fi
+  line="$(grep -E '^failed: ' <<< "$out" | tail -1)"
+  if [ "$rc" -eq 0 ] && [ "$line" = "failed: 0" ]; then
+    pass "65 partial_reasoning: $(grep -c '^ok' <<< "$out") checks (rag_agent and a domain agent raise by default and keep their computed half with the key on; the key validates and is listed)"
+  else
+    grep -E '^FAIL' <<< "$out" | head -20 | sed 's/^/    /' >&2
+    fail "65 partial_reasoning: ${line:-the checks did not finish} (run test/test_partial_reasoning.py)"
+  fi
+}
+
+# 71 ledger_payloads: what fractal_audit_log writes into the chain for every shape of entry type, payload and actor
+# (test/ledger_payloads.py): the caller's text never breaks the JSON or the chain.
+gate_71() {
+  if [ ! -f "$HERE/test/ledger_payloads.py" ]; then skip "71 ledger_payloads (no test/ledger_payloads.py)"; return; fi
+  if ! command -v python3 >/dev/null 2>&1; then skip "71 ledger_payloads (needs python3)"; return; fi
+  if ! ls "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension >/dev/null 2>&1; then
+    if ! nice make -C "$HERE" -s >/dev/null 2>&1; then fail "71 ledger_payloads: the extension did not build"; return; fi
+  fi
+  local out rc line
+  out="$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES -u ASAN_OPTIONS -u UBSAN_OPTIONS nice python3 -I "$HERE/test/ledger_payloads.py" 2>&1)"; rc=$?
+  line="$(grep -E '^ledger_payloads: ' <<< "$out" | tail -1)"
+  if [ "$rc" -eq 0 ] && [ -n "$line" ]; then
+    pass "71 ledger_payloads: ${line#ledger_payloads: }"
+  else
+    grep -E '^  FAIL' <<< "$out" | head -20 | sed 's/^/    /' >&2
+    fail "71 ledger_payloads: ${line:-the checks did not finish} (run test/ledger_payloads.py)"
+  fi
+}
+
+# 72 kit_mutation: the demo kits' own statements, with one literal argument replaced at a time by an awkward value; nothing may crash.
+# The kits run against the pure-C band, the same artifact the other python-driven gates load.
+gate_72() {
+  if [ ! -f "$HERE/test/kit_mutation.py" ]; then skip "72 kit_mutation (no test/kit_mutation.py)"; return; fi
+  if ! command -v python3 >/dev/null 2>&1; then skip "72 kit_mutation (needs python3)"; return; fi
+  # The kits run in-process (the pip duckdb module hosting the extension in each worker process), so a sanitizer
+  # cell skips them: the pip host is not instrumentable, the same reason gates 12 and 25 skip there.
+  if [ -n "$SAN_MODE" ]; then skip "72 kit_mutation (the in-process pip-duckdb host cannot be instrumented; skipped in ${SAN_MODE} cell)"; return; fi
+  if ! ls "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension >/dev/null 2>&1; then
+    if ! nice make -C "$HERE" -s >/dev/null 2>&1; then fail "72 kit_mutation: the extension did not build"; return; fi
+  fi
+  # The pip-hosted gates degrade to a clean skip when the package is absent (gates 12 and 25), so a wheel
+  # resolution failure -- as in a cell the workflow does not install it in -- is not a failing assertion.
+  if [ -z "$PY" ]; then skip "72 kit_mutation: python with the pip duckdb package is unavailable (set FSQL_PYTHON)"; return; fi
+  if [ -n "$PY_DUCKDB_MAJOR" ] && [ "$PY_DUCKDB_MAJOR" != "${DUCKDB_MAJOR:-1}" ]; then
+    skip "72 kit_mutation: the pip duckdb package is ${PY_DUCKDB_MAJOR}.x but the CLI under test is ${DUCKDB_MAJOR:-1}.x (the driver cannot read this engine's database file nor load its extension)"
+    return
+  fi
+  local ext out rc line
+  # The runner's own resolver, not a glob: it asks the CLI under test which
+  # DuckDB it is and takes that band's cell, so the gate cannot load a stale
+  # artifact from another platform's or another build's directory (the glob
+  # picks dist/cov's coverage band, which is older than the source). An
+  # FSQL_EXT the run named itself (a --gate or --coverage cell) wins.
+  ext="$(resolve_ext)"
+  if [ -n "${FSQL_EXT:-}" ] && [ -f "$FSQL_EXT" ]; then ext="$FSQL_EXT"; fi
+  out="$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES -u ASAN_OPTIONS -u UBSAN_OPTIONS FSQL_BT_EXT="$ext" \
+        nice python3 -I "$HERE/test/kit_mutation.py" 2>&1)"; rc=$?
+  line="$(grep -E '^kit mutation: ' <<< "$out" | tail -1)"
+  if [ "$rc" -eq 0 ] && [ -n "$line" ]; then
+    pass "72 kit_mutation: ${line#kit mutation: } (every kit statement with an awkward argument: no crash)"
+  else
+    printf '%s\n' "$out" | tail -8 | sed 's/^/    /' >&2
+    fail "72 kit_mutation: ${line:-the checks did not finish} (run test/kit_mutation.py)"
+  fi
+}
+
+# 73 scripted_replies: the extension against a model that answers exactly what the test scripts: the reply is handed back as the model
+# wrote it, and the embedding tier takes a vector in every shape the parser takes or refuses.
+gate_73() {
+  if [ ! -f "$HERE/test/scripted_replies.py" ]; then skip "73 scripted_replies (no test/scripted_replies.py)"; return; fi
+  if ! command -v python3 >/dev/null 2>&1; then skip "73 scripted_replies (needs python3)"; return; fi
+  if ! ls "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension >/dev/null 2>&1; then
+    if ! nice make -C "$HERE" -s >/dev/null 2>&1; then fail "73 scripted_replies: the extension did not build"; return; fi
+  fi
+  local ext out rc line
+  # The runner's own resolver, not a glob: it asks the CLI under test which
+  # DuckDB it is and takes that band's cell, so the gate cannot load a stale
+  # artifact from another platform's or another build's directory (the glob
+  # picks dist/cov's coverage band, which is older than the source).
+  ext="$(resolve_ext)"
+  out="$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES -u ASAN_OPTIONS -u UBSAN_OPTIONS FSQL_BT_EXT="$ext" \
+        nice python3 -I "$HERE/test/scripted_replies.py" 2>&1)"; rc=$?
+  line="$(grep -E '^scripted_replies: ' <<< "$out" | tail -1)"
+  if [ "$rc" -eq 0 ] && [ -n "$line" ]; then
+    pass "73 scripted_replies: ${line#scripted_replies: } (the model answers exactly what the test scripts)"
+  else
+    grep -E '^  FAIL' <<< "$out" | head -20 | sed 's/^/    /' >&2
+    fail "73 scripted_replies: ${line:-the checks did not finish} (run test/scripted_replies.py)"
+  fi
+}
+
+# 68 rename: the two-argument fractal_search was renamed fractal_sfs_converge. The old names are refused, and the refusal names the new
+# one: there are no aliases.
+gate_68() {
+  local ext out
+  # The runner's own resolver, not a glob: it asks the CLI under test which
+  # DuckDB it is and takes that band's cell, so the gate cannot load a stale
+  # artifact from another platform's or another build's directory (the glob
+  # picks dist/cov's coverage band, which is older than the source).
+  ext="$(resolve_ext)"
+  [ -n "$ext" ] || { skip "68 rename (the extension is not built)"; return; }
+  out="$(printf "LOAD '%s';\nSELECT fractal_search([1.0,0.1]::DOUBLE[], [1.0,0.1]::DOUBLE[]);\n" "$ext" | "$DUCKDB" -batch -unsigned 2>&1)"
+  if grep -q "renamed fractal_sfs_converge" <<< "$out"; then
+    pass "68 rename: fractal_search(vector, query) is refused and the refusal names fractal_sfs_converge"
+  else
+    printf '%s\n' "$out" | tail -5 | sed 's/^/    /' >&2; fail "68 rename: fractal_search(vector, query) was not refused"
+  fi
+  out="$(printf "LOAD '%s';\nSELECT fractal_sfs_converge([1.0,0.1]::DOUBLE[], [1.0,0.1]::DOUBLE[]);\n" "$ext" | "$DUCKDB" -batch -unsigned 2>&1)"
+  if grep -qi "error" <<< "$out"; then
+    printf '%s\n' "$out" | tail -5 | sed 's/^/    /' >&2; fail "68 rename: fractal_sfs_converge: $out"
+  else
+    pass "68 rename: fractal_sfs_converge(vector, query) answers"
+  fi
+}
+
+# 69 ledger_env: the ledger's environment configuration. The retention mode is read from the environment, and a value that is neither
+# fade nor exact is refused.
+gate_69() {
+  local ext out
+  # The runner's own resolver, not a glob: it asks the CLI under test which
+  # DuckDB it is and takes that band's cell, so the gate cannot load a stale
+  # artifact from another platform's or another build's directory (the glob
+  # picks dist/cov's coverage band, which is older than the source).
+  ext="$(resolve_ext)"
+  [ -n "$ext" ] || { skip "69 ledger_env (the extension is not built)"; return; }
+  out="$(printf "LOAD '%s';\nSELECT fractal_config_set('ledger_retention','exact');\n" "$ext" | "$DUCKDB" -batch -unsigned 2>&1)"
+  if grep -qi "error" <<< "$out"; then
+    printf '%s\n' "$out" | tail -5 | sed 's/^/    /' >&2; fail "69 ledger_env: the exact retention mode was refused: $out"
+  else
+    pass "69 ledger_env: the exact retention mode is accepted"
+  fi
+  out="$(printf "LOAD '%s';\nSELECT fractal_config_set('ledger_retention','sometimes');\n" "$ext" | "$DUCKDB" -batch -unsigned 2>&1)"
+  if grep -q "must be one of" <<< "$out"; then
+    pass "69 ledger_env: a retention mode that is neither fade nor exact is refused"
+  else
+    printf '%s\n' "$out" | tail -5 | sed 's/^/    /' >&2; fail "69 ledger_env: a bad retention mode was not refused: $out"
+  fi
+}
+
+# 70 redact_unit: the audit-redaction header at the storage seam (test/redact_unit.c): the hash and truncate modes, the buffer limits and
+# every JSON-special character.
+gate_70() {
+  local cc="${FSQL_CC:-cc}"
+  command -v "$cc" >/dev/null 2>&1 || { skip "70 redact_unit (no C compiler on PATH)"; return; }
+  [ -f "$HERE/test/redact_unit.c" ] || { skip "70 redact_unit (no test/redact_unit.c)"; return; }
+  local log="$PDIR/redact_unit_build.log" bin="$PDIR/redact_unit"
+  if ! env -u LD_PRELOAD "$cc" -std=c11 -O1 -g -Wno-unused-function -I"$HERE/src" -c "$HERE/test/redact_unit.c" -o "$PDIR/redact_unit.o" >"$log" 2>&1 \
+     || ! env -u LD_PRELOAD "$cc" "$PDIR/redact_unit.o" -o "$bin" >>"$log" 2>&1; then
+    tail -5 "$log" | sed 's/^/    /' >&2; fail "70 redact_unit: the unit test did not build"; return
+  fi
+  local out rc
+  out="$(env -u LD_PRELOAD "$bin" 2>&1)"; rc=$?
+  rm -f "$PDIR/redact_unit.o" "$bin"
+  if [ "$rc" -eq 0 ]; then pass "70 redact_unit: $(tail -1 <<< "$out")"
+  else printf '%s\n' "$out" | tail -12 | sed 's/^/    /' >&2; fail "70 redact_unit: see the output above"; fi
+}
+
+# 67 id_emission: how the domain agents write a row's id into their JSON result (test/id_emission.py). The id column is the caller's
+# data, so what an agent writes must never become JSON structure and must never be altered: an id is written as a JSON number only when
+# the whole text is one, otherwise as a string carrying the text exactly.
+gate_67() {
+  if [ ! -f "$HERE/test/id_emission.py" ]; then skip "67 id_emission (no test/id_emission.py)"; return; fi
+  if ! command -v python3 >/dev/null 2>&1; then skip "67 id_emission (needs python3)"; return; fi
+  if ! ls "$HERE"/dist/*/fractalsql.capi.*.duckdb_extension >/dev/null 2>&1; then
+    if ! nice make -C "$HERE" -s >/dev/null 2>&1; then fail "67 id_emission: the extension did not build"; return; fi
+  fi
+  local out rc line
+  out="$(env -u LD_PRELOAD -u DYLD_INSERT_LIBRARIES -u ASAN_OPTIONS -u UBSAN_OPTIONS nice python3 -I "$HERE/test/id_emission.py" 2>&1)"; rc=$?
+  line="$(grep -E '^id_emission: ' <<< "$out" | tail -1)"
+  if [ "$rc" -eq 0 ] && [ -n "$line" ]; then
+    pass "67 id_emission: ${line#id_emission: }"
+  else
+    grep -E '^  FAIL' <<< "$out" | head -20 | sed 's/^/    /' >&2
+    fail "67 id_emission: ${line:-the checks did not finish} (run test/id_emission.py)"
+  fi
+}
+
+# 66 feature_store: fractal_store_morphology / fractal_mine_topology_negatives -- the named per-doc_id vector store (a plain table, created on first use):
+# an upsert (last writer wins), true Euclidean nearest-first mining, a DOUBLE[] or a text vector, other dimensions skipped, bad input refused.
+gate_66() {
+  local r
+  r=$(sqlq \
+    "SELECT fractal_store_morphology(1, '[1,0,0]');" \
+    "SELECT fractal_store_morphology(2, '0.9,0.1,0');" \
+    "SELECT fractal_store_morphology(3, [0.0,1.0,0.0]::DOUBLE[]);" \
+    "SELECT fractal_store_morphology(2, '0.8,0.2,0');" \
+    "SELECT fractal_store_morphology(9, '[1,1]');" \
+    "SELECT 'M1=' || (fractal_mine_topology_negatives('[1,0,0]', 2)::JSON->>'\$[1].doc_id') || ',' || json_array_length(fractal_mine_topology_negatives('[1,0,0]', 2)::JSON);" \
+    "SELECT 'M2=' || json_array_length(fractal_mine_topology_negatives([0.0,1.0,0.0]::DOUBLE[], 10)::JSON);" \
+    "SELECT 'M3=' || (fractal_mine_topology_negatives([0.0,1.0,0.0]::DOUBLE[], 3)::JSON->>'\$[0].doc_id');" \
+    "SELECT 'M4=' || fractal_mine_topology_negatives('[1,0,0,0]', 3);" \
+    "SELECT 'M5=' || round((fractal_mine_topology_negatives('[1,0,0]', 2)::JSON->>'\$[1].distance')::DOUBLE, 6);"); rc=$?
+  if [ "$rc" -eq 0 ] && printf '%s' "$r" | grep -qF "M1=2,2" && printf '%s' "$r" | grep -qF "M2=3" && printf '%s' "$r" | grep -qF "M3=3" \
+     && printf '%s' "$r" | grep -qF "M4=[]" && printf '%s' "$r" | grep -qF "M5=0.282843"; then
+    pass "66 feature_store: store is an upsert (the second write of doc 2 wins), mine is nearest-first Euclidean, a DOUBLE[] works, other dimensions are skipped"
+  else
+    fail "66 feature_store: got '$r'"
+  fi
+  r=$(sqlq "SELECT fractal_mine_topology_negatives('[1,0,0]', 0);" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] && printf '%s' "$r" | grep -qF "k must be > 0" && pass "66 feature_store: k must be positive" || fail "66 feature_store: k=0 not refused: $r"
+  r=$(sqlq "SELECT fractal_store_morphology(-1, '[1]');" 2>&1); rc=$?
+  [ "$rc" -ne 0 ] && printf '%s' "$r" | grep -qF "doc_id must be >= 0" && pass "66 feature_store: a negative doc_id is refused" || fail "66 feature_store: negative doc_id not refused: $r"
+  r=$(sqlq "SELECT fractal_store_morphology(1, '[1,2,3]');" "SELECT count(*) FROM fractalsql_feature_store;" "SELECT fractal_store_morphology(NULL, '[1]');" 2>&1 | tr '\n' ' ')
+  printf '%s' "$r" | grep -qE "ok +[0-9]+ +NULL" && pass "66 feature_store: the store is a plain table (fractalsql_feature_store) and a NULL doc_id answers NULL" || fail "66 feature_store: table/NULL: $r"
+}
+
+# 62 lakehouse: demo/demo-lakehouse-ducklake.sql and demo/demo-lakehouse-iceberg.sql run start to finish against the fixtures
+# this gate writes under a private LAKE_DIR (the docker demo's lake-fixture / ducklake-fixture services write the same ones).
+# Skips, naming what is missing, when DuckDB cannot download the ducklake / iceberg extensions (no network) or python3 has no
+# pyiceberg + pyarrow + sqlalchemy for the Iceberg writer.
+gate_62() {
+  local lake kdir kf out rc ran=0
+  lake="$(mktemp -d "${TMPDIR:-/tmp}/fsql_lake_XXXXXX")"; mkdir -p "$lake/ducklake"
+  kdir="$(mktemp -d "${TMPDIR:-/tmp}/fsql_lakedir_XXXXXX")"
+  kf="$(mktemp "${TMPDIR:-/tmp}/fsql_lake_XXXXXX.sql")"
+  local lakew; lakew="$(wpath "$lake")"
+  # --- DuckLake
+  if out="$(cd "$lake" && LAKE_DIR="$lakew" "$DUCKDB" -unsigned < "$HERE/demo/lakehouse/make_ducklake_fixture.sql" 2>&1)"; then
+    { printf "LOAD '%s';\n" "$EXTW"; cat "$HERE/demo/demo-lakehouse-ducklake.sql"; } > "$kf"
+    rc=0; out="$(cd "$kdir" && env LAKE_DIR="$lakew" $(kit_env | tr '\n' ' ') "$DUCKDB" -batch -list -noheader -unsigned -separator '|' < "$kf" 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ] && ! grep -qE '^[A-Za-z ]*Error: ' <<< "$out" && grep -q '"intercepted":true' <<< "$out" && grep -q '"intercepted":false' <<< "$out"; then
+      pass "62 lakehouse: demo-lakehouse-ducklake.sql reads the DuckLake table and its screen intercepts the outage state and lets the healthy one through"
+    else
+      grep -E 'Error' <<< "$out" | head -5 | sed 's/^/    /' >&2; fail "62 lakehouse: demo-lakehouse-ducklake.sql (exit $rc)"
+    fi
+    ran=1
+  else
+    skip "62 lakehouse: the DuckLake fixture could not be written (DuckDB downloads the ducklake extension): ${out:0:120}"
+  fi
+  # --- Iceberg
+  if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import pyiceberg, pyarrow, sqlalchemy' >/dev/null 2>&1; then
+    skip "62 lakehouse: the Iceberg demo needs python3 with pyiceberg, pyarrow and sqlalchemy for its fixture writer"
+  elif ! out="$(cd "$lake" && LAKE_DIR="$lakew" python3 "$HERE/demo/lakehouse/make_iceberg_fixture.py" 2>&1)"; then
+    fail "62 lakehouse: the Iceberg fixture writer failed: ${out: -200}"
+  else
+    { printf "LOAD '%s';\n" "$EXTW"; cat "$HERE/demo/demo-lakehouse-iceberg.sql"; } > "$kf"
+    rc=0; out="$(cd "$kdir" && env LAKE_DIR="$lakew" $(kit_env | tr '\n' ' ') "$DUCKDB" -batch -list -noheader -unsigned -separator '|' < "$kf" 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ] && ! grep -qE '^[A-Za-z ]*Error: ' <<< "$out" && grep -q '"intercepted":true' <<< "$out" && grep -q '"intercepted":false' <<< "$out"; then
+      pass "62 lakehouse: demo-lakehouse-iceberg.sql reads the Iceberg table and its screen intercepts the outage state and lets the healthy one through"
+    else
+      grep -E 'Error' <<< "$out" | head -5 | sed 's/^/    /' >&2; fail "62 lakehouse: demo-lakehouse-iceberg.sql (exit $rc)"
+    fi
+    ran=1
+  fi
+  rm -rf "$lake" "$kdir" "$kf"
+  return 0
+}
+
 gate_body() {
   case "$1" in
     01) gate_01 ;;
@@ -3769,6 +4328,21 @@ gate_body() {
     56) gate_56 ;;
     57) gate_57 ;;
     58) gate_58 ;;
+    59) gate_59 ;;
+    60) gate_60 ;;
+    61) gate_61 ;;
+    62) gate_62 ;;
+    63) gate_63 ;;
+    64) gate_64 ;;
+    65) gate_65 ;;
+    66) gate_66 ;;
+    67) gate_67 ;;
+    68) gate_68 ;;
+    69) gate_69 ;;
+    70) gate_70 ;;
+    71) gate_71 ;;
+    72) gate_72 ;;
+    73) gate_73 ;;
   esac
 }
 
@@ -3795,7 +4369,7 @@ gate_name() {
     19) echo "sfs_bounds" ;;
     20) echo "api_func" ;;
     21) echo "fuzz_smoke" ;;
-    22) echo "v2_functions" ;;
+    22) echo "new_primitives" ;;
     23) echo "agents" ;;
     24) echo "enterprise" ;;
     25) echo "enterprise_stress" ;;
@@ -3831,6 +4405,21 @@ gate_name() {
     56) echo "capi_oom" ;;
     57) echo "capi_oom_full" ;;
     58) echo "mcp_audit_http" ;;
+    59) echo "audit_regress" ;;
+    60) echo "precision" ;;
+    61) echo "index" ;;
+    62) echo "lakehouse" ;;
+    63) echo "enterprise_core" ;;
+    64) echo "unicode" ;;
+    65) echo "partial_reasoning" ;;
+    66) echo "feature_store" ;;
+    67) echo "id_emission" ;;
+    68) echo "rename" ;;
+    69) echo "ledger_env" ;;
+    70) echo "redact_unit" ;;
+    71) echo "ledger_payloads" ;;
+    72) echo "kit_mutation" ;;
+    73) echo "scripted_replies" ;;
     *) echo "" ;;
   esac
 }
@@ -3880,10 +4469,16 @@ main() {
   if [ -n "${LIST_ONLY:-}" ]; then
     local g
     for g in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 \
-             21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 45 46 47 48 49 50 51 52 53 54 55 56 57 58; do
+             21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66; do
       printf '  %s  %s\n' "$g" "$(gate_name "$g")"
     done
     exit 0
+  fi
+  # The fixture files under $BTROOT are shared by every run of this host (and
+  # of the hosts that use the same mock plugin), so only one run may have them
+  # at a time. Taken before anything reads or writes them.
+  if ! acquire_run_lock; then
+    die "another build_test run is holding $LOCKDIR -- the fixture files under $BTROOT are shared, so only one run at a time; wait for the other run to finish (held by $(cat "$LOCKDIR/owner" 2>/dev/null || echo "an unknown run"))"
   fi
 
   find_toolchain
@@ -3930,7 +4525,8 @@ main() {
     to_run=(21 42 52)
   else
     to_run=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 \
-            22 23 24 25 26 27 28 29 30 31 32 34 35 36 37 38 39 40 43 45 46 47 48 49 51 53 54 55 56)
+            22 23 24 25 26 27 28 29 30 31 32 34 35 36 37 38 39 40 43 45 46 47 48 49 51 53 54 55 56 59 60 61 62 63 64 65 66 \
+            67 68 69 70 71 72 73)
     [ "$FAULT" = 1 ] && to_run+=("${FAULT_GATES[@]}")
   fi
 
@@ -3998,11 +4594,18 @@ main() {
   [ "$FAILED" -eq 0 ] && [ -n "$MCP_WORK" ] && [ -d "$MCP_WORK" ] && rm -rf "$MCP_WORK"
 
   # --coverage: the extension's own sources, after the MCP report. test/coverage_run.sh builds the extension with gcov and
-  # drives it with gates 01-34, the parity corpus, the edge matrix, the unit tests, the fuzz corpus and the allocation-
-  # failure sweep; it prints its own report and fails below 80% lines, functions or branches.
+  # drives it. Plain --coverage runs the quick stages (build, gates 01-34, the error table and the ledger through SQL, the
+  # header unit tests, report); with --fault it adds the heavy ones (parity corpus, edge matrix, lifecycle modes and the
+  # allocation-failure sweep). It prints its own report and fails below 80% lines, functions or branches.
   if [ "$COVERAGE_ALL" -eq 1 ]; then
-    printf '\n== extension sources (src/*.c): gcov build driven by gates 01-34, parity, edge matrix, unit tests, fuzz corpus, OOM sweep\n'
-    if "$HERE/test/coverage_run.sh"; then pass "coverage: extension src/*.c at or above 80% for lines, functions and branches"
+    if [ "$FAULT" -eq 1 ]; then
+      covstages="build gates parity edge table unit lifecycle oom report"
+      printf '\n== extension sources (src/*.c): gcov build driven by gates 01-34, parity, edge matrix, error table, unit tests, lifecycle, OOM sweep\n'
+    else
+      covstages="build gates table unit report"
+      printf '\n== extension sources (src/*.c): gcov build driven by gates 01-34, error table, ledger through SQL, unit tests (quick; add --fault for parity, edge matrix, lifecycle and the OOM sweep)\n'
+    fi
+    if STAGES="$covstages" "$HERE/test/coverage_run.sh"; then pass "coverage: extension src/*.c at or above 80% for lines, functions and branches"
     else fail "coverage: extension src/*.c coverage run failed or is below 80% (see the report above)"; fi
   fi
 

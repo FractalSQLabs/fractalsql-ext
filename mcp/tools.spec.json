@@ -31,12 +31,26 @@
      "type": "str",
      "duck": "VARCHAR",
      "required": true,
-     "desc": "The configuration key to read: reasoning_plugin, http_url, http_model, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, http_response_mode, http_token or enterprise_lib. http_token is refused: it is a secret.",
+     "desc": "The configuration key to read: reasoning_plugin, http_url, http_model, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, http_response_mode, http_allow_plaintext, http_token, enterprise_lib, enterprise_require_signature, ledger_retention, agent_use_index, agent_index_min_rows, agent_context_row_bytes, text_to_sql_allowed_statements or text_to_sql_use_review. http_token is refused: it is a secret.",
      "default": null,
      "named": false,
      "needs": []
     }
    ],
+   "secret": false
+  },
+  {
+   "name": "fractal_config_keys",
+   "category": "admin",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "json_text",
+   "ret": "VARCHAR",
+   "desc": "Every configuration key the extension knows, as {name, type, session_overridable}: string, path, int, bool or enum (agent_use_index is an enum: off, on, auto). Lets a caller discover the keys instead of hard-coding them; every key is changed with fractal_config_set.",
+   "params": [],
    "secret": false
   },
   {
@@ -56,7 +70,7 @@
      "type": "str",
      "duck": "VARCHAR",
      "required": true,
-     "desc": "The configuration key to write: reasoning_plugin, http_url, http_model, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, http_response_mode, http_token or enterprise_lib. A key this build does not know is refused.",
+     "desc": "The configuration key to write: reasoning_plugin, http_url, http_model, http_embed_url, http_embed_model, http_think, http_think_provider, http_native_url, http_num_ctx, http_response_mode, http_allow_plaintext (on or off), http_token, enterprise_lib, enterprise_require_signature (on only: turning the signature requirement off is an operator setting), ledger_retention (fade or exact), agent_use_index (off, on or auto: the retrieval and nearest-row agents search through a fractal_index), agent_index_min_rows (auto: the smallest table searched through an index), agent_context_row_bytes (the longest text cell passed to the model), text_to_sql_allowed_statements (select or select_insert_update) or text_to_sql_use_review (on or off). A key this build does not know is refused.",
      "default": null,
      "named": false,
      "needs": []
@@ -76,7 +90,7 @@
      "type": "bool",
      "duck": "BOOLEAN",
      "required": false,
-     "desc": "Must be true to write an enterprise-posture key (enterprise_lib): an explicit operator intent, never a default. A client UI that honours annotations prompts a human first for it.",
+     "desc": "Must be true to write an enterprise-posture key (enterprise_lib, ledger_retention): an explicit operator intent, never a default. A client UI that honours annotations prompts a human first for it.",
      "default": false,
      "named": false,
      "needs": []
@@ -2880,7 +2894,7 @@
    "openWorld": true,
    "out": "rows",
    "ret": "",
-   "desc": "Retrieval-augmented answer over a table (rows): embeds the question, retrieves, and answers from the hits. Needs an embedding provider and a model.",
+   "desc": "Retrieval-augmented answer over a table (rows: answer, source_row_ids, used_index, context_cut): embeds the question, retrieves (through a fractal_index when agent_use_index allows it), and answers from the hits. meta_filter, a flat JSON object of column: value pairs, limits the rows searched. Needs an embedding provider and a model.",
    "params": [
     {
      "name": "query",
@@ -2917,7 +2931,7 @@
      "type": "jsonstr",
      "duck": "VARCHAR",
      "required": false,
-     "desc": "Reserved for a future metadata filter.",
+     "desc": "Flat JSON object of column: value pairs; only rows where every column equals its value are searched.",
      "default": "{}",
      "named": false,
      "needs": []
@@ -3005,7 +3019,7 @@
    "openWorld": true,
    "out": "rows",
    "ret": "",
-   "desc": "Embed a question, search a table, and answer from the hits (rows). Needs an embedding provider and a model.",
+   "desc": "Embed a question, find the nearest rows of a table (a Scout search, or through a fractal_index when agent_use_index allows it), and answer from the hits (rows: answer, execution_time_ms, source_row_ids, used_index, context_cut). meta_filter limits the rows searched. Needs an embedding provider and a model.",
    "params": [
     {
      "name": "query",
@@ -3056,12 +3070,22 @@
      "default": 15,
      "named": false,
      "needs": []
+    },
+    {
+     "name": "meta_filter",
+     "type": "jsonstr",
+     "duck": "VARCHAR",
+     "required": false,
+     "desc": "Flat JSON object of column: value pairs; only rows where every column equals its value are searched.",
+     "default": "{}",
+     "named": true,
+     "needs": []
     }
    ],
    "secret": true
   },
   {
-   "name": "fractal_search_debug",
+   "name": "fractal_sfs_converge_debug",
    "category": "discovery",
    "kind": "scalar",
    "class": "expensive",
@@ -3070,7 +3094,7 @@
    "openWorld": false,
    "out": "json_text",
    "ret": "VARCHAR",
-   "desc": "Same Sniper convergence as fractal_search with a full trajectory trace: {dim, generations, population_size, best_point, best_fit, best_fit_per_gen, paths}. best_point is a plain JSON array of numbers.",
+   "desc": "Same Sniper convergence as fractal_sfs_converge with a full trajectory trace: {dim, generations, population_size, best_point, best_fit, best_fit_per_gen, paths}. best_point is a plain JSON array of numbers.",
    "params": [
     {
      "name": "query",
@@ -3171,7 +3195,7 @@
    "secret": false
   },
   {
-   "name": "fractal_search",
+   "name": "fractal_sfs_converge",
    "category": "discovery",
    "kind": "scalar",
    "class": "cheap",
@@ -3957,6 +3981,832 @@
      "duck": "FLOAT[]",
      "required": true,
      "desc": "The vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_search",
+   "category": "discovery",
+   "kind": "table",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "rows",
+   "ret": "",
+   "desc": "Approximate nearest neighbours from the native IVF index: [{doc_id, distance, scan_pos}]. The index proposes the candidates and every one of them is verified against the base table, so the distance reported is the exact double-precision cosine. With no index (or with use_index=false) it is an exact scan. Indexed search does NOT apply Diversify repulsion: use fractal_search_explore for a diverse population. The ids option restricts the search to a set of keys: a short set is scanned exactly, a long one goes through the index and is filtered.",
+   "params": [
+    {
+     "name": "table_name",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The table to search.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "vector_col",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The column holding the vectors.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "query",
+     "type": "vec",
+     "duck": "DOUBLE[]",
+     "required": true,
+     "desc": "Query vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "k",
+     "type": "int",
+     "duck": "INTEGER",
+     "required": true,
+     "desc": "Neighbors to return.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "options",
+     "type": "json",
+     "duck": "VARCHAR",
+     "required": false,
+     "desc": "Search options: index, nprobe, rerank, use_index, verify, model. ids:int[] restricts the search to those keys (a short set is scanned exactly, a long one goes through the index and is filtered).",
+     "default": {},
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_index_candidates",
+   "category": "discovery",
+   "kind": "table",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "rows",
+   "ret": "",
+   "desc": "The candidate row ids for Scout: every row of the nearest cells, plus a few representatives of every other cell, plus the rows committed after the index was built.",
+   "params": [
+    {
+     "name": "table_name",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The table to search.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "vector_col",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The column holding the vectors.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "query",
+     "type": "vec",
+     "duck": "DOUBLE[]",
+     "required": true,
+     "desc": "Query vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "options",
+     "type": "json",
+     "duck": "VARCHAR",
+     "required": false,
+     "desc": "Candidate options: near (cells in full), per_cell (representatives of the rest), index.",
+     "default": {},
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_index_create",
+   "category": "discovery",
+   "kind": "scalar",
+   "class": "expensive",
+   "readOnly": false,
+   "destructive": true,
+   "openWorld": false,
+   "out": "json_text",
+   "ret": "VARCHAR",
+   "desc": "Builds the native IVF index over a vector column and stores it in the database (fractal_index_meta / fractal_index_cells). The build streams: the corpus is never held in memory. The recall calibration chooses the nprobe.",
+   "params": [
+    {
+     "name": "table_name",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The table to index.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "vector_col",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The vector column.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "options",
+     "type": "json",
+     "duck": "VARCHAR",
+     "required": false,
+     "desc": "Index options: name, vector_format, nlist, pca_dim, iters, sample, seed, target_recall, calibration_samples, id_col.",
+     "default": {},
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false,
+   "idempotent": false
+  },
+  {
+   "name": "fractal_index_rebuild",
+   "category": "discovery",
+   "kind": "scalar",
+   "class": "expensive",
+   "readOnly": false,
+   "destructive": true,
+   "openWorld": false,
+   "out": "json_text",
+   "ret": "VARCHAR",
+   "desc": "Rebuilds an existing index from the current rows, keeping its options.",
+   "params": [
+    {
+     "name": "name",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The index name.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false,
+   "idempotent": false
+  },
+  {
+   "name": "fractal_index_drop",
+   "category": "discovery",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": false,
+   "destructive": true,
+   "openWorld": false,
+   "out": "scalar",
+   "ret": "BIGINT",
+   "desc": "Drops an index and its stored cells.",
+   "params": [
+    {
+     "name": "name",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The index name.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_index_info",
+   "category": "discovery",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "json_text",
+   "ret": "VARCHAR",
+   "desc": "An index's format, sizes, staleness, recall calibration and the statistics of the last search (rows_scanned, cells_probed) -- the evidence that the index was used. Also a status (ready, stale, degraded, empty or orphaned) and an advice list: for example 'refresh: 60 rows were added since the build', 'rebuild: 30% of the rows were deleted', or 'the build's calibration reached recall 0.63 against a target of 0.95'.",
+   "params": [
+    {
+     "name": "name",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The index name.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_index_list",
+   "category": "discovery",
+   "kind": "table",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "rows",
+   "ret": "",
+   "desc": "The catalog: one row per index with name, table_name, vector_col, format, dim, rows indexed, rows_now, stale, status (ready, stale, degraded, empty or orphaned) and generation. No rows means no index has been built in this database.",
+   "params": [],
+   "secret": false
+  },
+  {
+   "name": "fractal_index_refresh",
+   "category": "discovery",
+   "kind": "scalar",
+   "class": "expensive",
+   "readOnly": false,
+   "destructive": true,
+   "openWorld": false,
+   "out": "json_text",
+   "ret": "VARCHAR",
+   "desc": "Folds the rows added since the build into the index's cells, as a new generation switched in atomically, without retraining (the model is kept). Returns {name, added, rows, generation, refreshed}. Deleted rows and changed vectors are not touched: use fractal_index_rebuild when fractal_index_info advises a rebuild.",
+   "params": [
+    {
+     "name": "name",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The index name.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false,
+   "idempotent": false
+  },
+  {
+   "name": "fractal_index_ensure",
+   "category": "discovery",
+   "kind": "scalar",
+   "class": "expensive",
+   "readOnly": false,
+   "destructive": true,
+   "openWorld": false,
+   "out": "json_text",
+   "ret": "VARCHAR",
+   "desc": "Leaves the index on a table and column fit to use, in one call: builds it when missing (created), folds in the added rows when that is all that is needed (refreshed), rebuilds after more than a quarter of the rows were added or a fifth deleted (rebuilt), and otherwise changes nothing (unchanged). Returns {name, action, status, generation, rows}. For a setup script or a scheduled job; a search never builds or changes an index.",
+   "params": [
+    {
+     "name": "table_name",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The table to index.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "vector_col",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The vector column.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "options",
+     "type": "json",
+     "duck": "VARCHAR",
+     "required": false,
+     "desc": "Used only when it builds: the same options as fractal_index_create.",
+     "default": {},
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false,
+   "idempotent": false
+  },
+  {
+   "name": "fractal_chunk_text",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "json_text",
+   "ret": "VARCHAR",
+   "desc": "Splits text into chunks of at most chunk_size characters (code points) and returns a JSON array of {no, start, end, text}; start and end are character offsets, end exclusive. chunk_mode paragraph (default) packs whole paragraphs, sentence packs whole sentences, fixed cuts every chunk_size - chunk_overlap characters; a paragraph or sentence longer than chunk_size is cut with chunk_overlap shared. Pure: no model, the same output on every FractalSQL host.",
+   "params": [
+    {
+     "name": "text",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": true,
+     "desc": "The text to split.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "chunk_size",
+     "type": "int",
+     "duck": "INTEGER",
+     "required": true,
+     "desc": "Largest chunk in characters, 1..100000.",
+     "default": 800,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "chunk_overlap",
+     "type": "int",
+     "duck": "INTEGER",
+     "required": false,
+     "desc": "Characters shared by neighbouring pieces when a paragraph or sentence has to be cut, 0..chunk_size-1.",
+     "default": 0,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "chunk_mode",
+     "type": "str",
+     "duck": "VARCHAR",
+     "required": false,
+     "desc": "paragraph, sentence or fixed.",
+     "default": "paragraph",
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false,
+   "idempotent": true
+  },
+  {
+   "name": "fractal_store_morphology",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": false,
+   "destructive": false,
+   "openWorld": false,
+   "out": "scalar",
+   "ret": "VARCHAR",
+   "desc": "Upserts a feature vector against a doc_id in the generic per-item feature store (table fractalsql_feature_store, created on first use). The last write wins. Returns 'ok'.",
+   "params": [
+    {
+     "name": "doc_id",
+     "type": "int",
+     "duck": "BIGINT",
+     "required": true,
+     "desc": "Feature-store key, 0 or more.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "feature_array",
+     "type": "vec",
+     "duck": "DOUBLE[]",
+     "required": true,
+     "desc": "Feature vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_mine_topology_negatives",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "json_text",
+   "ret": "VARCHAR",
+   "desc": "Brute-force k-NN (true Euclidean, ascending) over the fractal_store_morphology feature store. Returns [{'doc_id','distance'}], nearest first. A stored row whose dimension differs from the surrogate is skipped, not an error.",
+   "params": [
+    {
+     "name": "surrogate_vector",
+     "type": "vec",
+     "duck": "DOUBLE[]",
+     "required": true,
+     "desc": "Query vector into the feature store.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "k",
+     "type": "int",
+     "duck": "INTEGER",
+     "required": true,
+     "desc": "Neighbors to return.",
+     "default": 10,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_vector_from_text",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "native",
+   "ret": "FLOAT[]",
+   "desc": "Builds the canonical vector from an array of numbers. This engine's vector is a plain list of floats, so the input is the array itself, not a text form.",
+   "params": [
+    {
+     "name": "vector",
+     "type": "vec",
+     "duck": "DOUBLE[]",
+     "required": true,
+     "desc": "The vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false,
+   "sql": "fractal_vector_from_float8_array"
+  },
+  {
+   "name": "fractal_vector_to_json",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "native",
+   "ret": "DOUBLE[]",
+   "desc": "Renders a vector as JSON: the array of numbers, so a client can see exactly what the engine holds.",
+   "params": [
+    {
+     "name": "vector",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false,
+   "sql": "fractal_vector_to_float8_array"
+  },
+  {
+   "name": "fractal_vector_dims",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "scalar",
+   "ret": "INTEGER",
+   "desc": "The vector's dimension: how many components it has. Check it before handing a vector to the vectorizer.",
+   "params": [
+    {
+     "name": "v",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_vector_norm",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "scalar",
+   "ret": "FLOAT",
+   "desc": "The vector's L2 norm (its magnitude).",
+   "params": [
+    {
+     "name": "v",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_vector_normalize",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "native",
+   "ret": "FLOAT[]",
+   "desc": "The vector scaled to unit length, so a distance between two vectors reflects direction only.",
+   "params": [
+    {
+     "name": "v",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_vector_add",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "native",
+   "ret": "FLOAT[]",
+   "desc": "The element-wise sum of two vectors.",
+   "params": [
+    {
+     "name": "a",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The first vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "b",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The second vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_vector_sub",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "native",
+   "ret": "FLOAT[]",
+   "desc": "The element-wise difference of two vectors.",
+   "params": [
+    {
+     "name": "a",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The first vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "b",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The second vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_vector_l2_distance",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "scalar",
+   "ret": "FLOAT",
+   "desc": "The L2 (Euclidean) distance between two vectors.",
+   "params": [
+    {
+     "name": "a",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The first vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "b",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The second vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_vector_l2_squared",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "scalar",
+   "ret": "FLOAT",
+   "desc": "The squared L2 distance: the same measure without the square root.",
+   "params": [
+    {
+     "name": "a",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The first vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "b",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The second vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_vector_cosine_distance",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "scalar",
+   "ret": "FLOAT",
+   "desc": "The cosine distance between two vectors: 0 when they point the same way, 1 when they are orthogonal.",
+   "params": [
+    {
+     "name": "a",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The first vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "b",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The second vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_vector_cosine_similarity",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "scalar",
+   "ret": "FLOAT",
+   "desc": "The cosine similarity between two vectors: 1 when they point the same way, 0 when they are orthogonal.",
+   "params": [
+    {
+     "name": "a",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The first vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "b",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The second vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    }
+   ],
+   "secret": false
+  },
+  {
+   "name": "fractal_vector_scale",
+   "category": "analytics",
+   "kind": "scalar",
+   "class": "cheap",
+   "readOnly": true,
+   "destructive": false,
+   "openWorld": false,
+   "out": "native",
+   "ret": "FLOAT[]",
+   "desc": "The vector multiplied by a scalar factor.",
+   "params": [
+    {
+     "name": "v",
+     "type": "vec",
+     "duck": "FLOAT[]",
+     "required": true,
+     "desc": "The vector.",
+     "default": null,
+     "named": false,
+     "needs": []
+    },
+    {
+     "name": "s",
+     "type": "num",
+     "duck": "FLOAT",
+     "required": true,
+     "desc": "The factor to scale by.",
      "default": null,
      "named": false,
      "needs": []

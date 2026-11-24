@@ -166,7 +166,7 @@ static int quote_column(const char *s, fsql_sb *b, char *err) {
 /* Options                                                              */
 /* ------------------------------------------------------------------ */
 
-typedef struct { int64_t max_embeds_per_window, window_secs; } vopts;
+typedef struct { int64_t max_embeds_per_window, window_secs; int index_ensure; } vopts;
 
 static void ws(const char *s, size_t n, size_t *i) { while (*i < n && (s[*i] == ' ' || s[*i] == '\t' || s[*i] == '\n' || s[*i] == '\r')) (*i)++; }
 
@@ -236,7 +236,7 @@ static bool skip_value(const char *s, size_t n, size_t *i) {
 static int parse_options(const char *s, vopts *o, char *err) {
     static const char bad[] = "fractalsql: vectorizer options: malformed JSON";
     size_t n = strlen(s), i = 0;
-    o->max_embeds_per_window = 0; o->window_secs = 3600;
+    o->max_embeds_per_window = 0; o->window_secs = 3600; o->index_ensure = 0;
     ws(s, n, &i);
     if (i >= n) return 0;
     if (s[i] != '{') { snprintf(err, ERRCAP, "fractalsql: vectorizer options must be a JSON object"); return -1; }
@@ -264,6 +264,11 @@ static int parse_options(const char *s, vopts *o, char *err) {
                 if (value < 1) { snprintf(err, ERRCAP, "fractalsql: vectorizer option '%s' must be a positive number of seconds", k); goto done; }
                 o->window_secs = value;
             }
+        } else if (!strcmp(k, "index_ensure")) {
+            /* true or false: after a process_queue batch, an existing index on the embedding column is brought up to date */
+            if (n - i >= 4 && !strncmp(s + i, "true", 4)) { o->index_ensure = 1; i += 4; }
+            else if (n - i >= 5 && !strncmp(s + i, "false", 5)) { o->index_ensure = 0; i += 5; }
+            else { snprintf(err, ERRCAP, "fractalsql: vectorizer option 'index_ensure' must be true or false"); goto done; }
         } else {
             if (!skip_value(s, n, &i)) { snprintf(err, ERRCAP, "%s", bad); goto done; }
             snprintf(err, ERRCAP, "fractalsql: unknown vectorizer option '%s'", k);
@@ -444,6 +449,8 @@ static void create_fn(duckdb_function_info info, duckdb_data_chunk in, duckdb_ve
     fsql_instance *inst = fsql_scalar_instance(info);
     idx_t n = duckdb_data_chunk_get_size(in), nc = duckdb_data_chunk_get_column_count(in);
     char err[ERRCAP];
+    /* a[] below holds five arguments; the registration table binds 3, 4 or 5, but nothing else enforces that here. */
+    if (nc > 5) { fail(info, "fractalsql: fractal_vectorizer_create takes at most 5 arguments"); return; }
     if (ensure_tables(inst, err)) { fail(info, err); return; }
     int64_t *res = (int64_t *)duckdb_vector_get_data(out);
     for (idx_t i = 0; i < n; i++) {
@@ -516,10 +523,12 @@ static void resume_fn(duckdb_function_info i, duckdb_data_chunk in, duckdb_vecto
 typedef struct {
     int64_t id;
     char *q_source, *q_pk, *q_text, *q_emb;
+    char *raw_source, *raw_emb;       /* the names as registered (for the index lookup) */
+    int did;                          /* this batch finished a row for it */
     vopts opts;
 } vcfg;
 
-static void vcfg_free(vcfg *c) { free(c->q_source); free(c->q_pk); free(c->q_text); free(c->q_emb); }
+static void vcfg_free(vcfg *c) { free(c->q_source); free(c->q_pk); free(c->q_text); free(c->q_emb); free(c->raw_source); free(c->raw_emb); }
 
 static char *sb_dup_quoted(int (*q)(const char *, fsql_sb *, char *), const char *s, char *err) {
     fsql_sb b; fsql_sb_init(&b);
@@ -593,6 +602,7 @@ static int process_queue(fsql_instance *inst, int64_t batch, int64_t stale, int6
             else if (!(c.q_text = sb_dup_quoted(quote_column, tx, err))) bad = 1;
             else if (!(c.q_emb = sb_dup_quoted(quote_column, em, err))) bad = 1;
             else if (parse_options(op, &c.opts, err)) bad = 1;
+            if (!bad && c.opts.index_ensure) { c.raw_source = st; c.raw_emb = em; st = em = NULL; }
             free(st); free(pk); free(tx); free(em); free(op);
             if (!bad) {
                 fsql_sb_clear(&sql);
@@ -651,6 +661,7 @@ static int process_queue(fsql_instance *inst, int64_t batch, int64_t stale, int6
                            c->q_source, c->q_emb, c->q_text, FSQL_MAX_INPUT_BYTES, c->q_text, c->q_pk);
             put_lit(&sql, pk);
             if (!run(inst, fsql_sb_cstr(&sql), msg)) {
+                ((vcfg *)c)->did = 1;
                 fsql_sb_clear(&sql);
                 fsql_sb_printf(&sql, "UPDATE fractal_vectorizer_queue SET status = 'done', error = NULL WHERE vectorizer_id = %" PRId64 " AND pk_value = ", vid);
                 put_lit(&sql, pk);
@@ -668,6 +679,24 @@ static int process_queue(fsql_instance *inst, int64_t batch, int64_t stale, int6
         duckdb_destroy_data_chunk(&ch);
     }
     fsql_qres_free(&cr);
+
+    /* The vectorizer option index_ensure (off by default): an index that already exists on the embedding column of a vectorizer that
+     * finished rows in this batch is brought up to date with fractal_index_ensure. It never creates an index and a failure never fails the batch. */
+    for (size_t k = 0; k < ncfg; k++) {
+        const vcfg *c = &cfgs[k];
+        if (!c->opts.index_ensure || !c->did || !c->raw_source || !c->raw_emb) continue;
+        fsql_sb_clear(&sql);
+        fsql_sb_puts(&sql, "SELECT CASE WHEN EXISTS (SELECT 1 FROM fractal_index_meta WHERE tbl = ");
+        put_lit(&sql, c->raw_source);
+        fsql_sb_puts(&sql, " AND col = ");
+        put_lit(&sql, c->raw_emb);
+        fsql_sb_puts(&sql, ") THEN fractal_index_ensure(");
+        put_lit(&sql, c->raw_source);
+        fsql_sb_puts(&sql, ", ");
+        put_lit(&sql, c->raw_emb);
+        fsql_sb_puts(&sql, ") END");
+        run(inst, fsql_sb_cstr(&sql), msg);
+    }
 
     /* housekeeping is best effort */
     run(inst, "DELETE FROM fractal_vectorizer_queue WHERE (status = 'done' AND enqueued_at < now() - INTERVAL 1 HOUR) "

@@ -174,6 +174,7 @@ FROM fractal_search_trajectory(
 -- search, and one reasoning step folded together). The cohort list is
 -- the sepsis-watch cohort's rowid values -- this build's row locator:
 .print --- Preset: fractal_agent_patient_deterioration_triage ---
+CREATE OR REPLACE TEMP TABLE vmc_triage AS
 SELECT fractal_agent_patient_deterioration_triage(
     'vmc_patients', 'vitals',
     [1, -1, 1, 1, 0.5]::float8[],
@@ -181,11 +182,13 @@ SELECT fractal_agent_patient_deterioration_triage(
     [1.4, -1.1, 0.9, 0.7, 1.2]::float8[],
     (SELECT list(rowid ORDER BY rowid) FROM vmc_patients
       WHERE age > 65 AND condition = 'sepsis'),
-    5, 'id');
+    5, 'id') AS triage;
+SELECT triage FROM vmc_triage;
 
--- The composition's standalone reason leg -- kept raw exactly as the
--- reference composition ran it (same narrative, not a bare ping):
-SELECT fractal_reason('one-line deterioration-triage rationale for this patient cohort scan');
+-- A standalone reasoning call over the preset's findings (the cohort
+-- match, trajectory distances and drift read above):
+SELECT fractal_reason('one-line deterioration-triage rationale for this patient cohort scan',
+    (SELECT to_json(r)::text FROM vmc_triage r));
 
 -- ------------------------------------------------------------------
 -- 4. fractal_vascular_network: a branching vessel graph -- a 28-node

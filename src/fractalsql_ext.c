@@ -14,10 +14,10 @@
  *
  * Registered here (smoke + search surface):
  *   fractal_edition() -> VARCHAR        "Community"
- *   fractal_version() -> VARCHAR        "2.0.1"
- *   fractal_search(query [, iterations [, population_size [, diffusion]]])
+ *   fractal_version() -> VARCHAR        "2.0.2"
+ *   fractal_sfs_converge(query [, iterations [, population_size [, diffusion]]])
  *                                          -> DOUBLE[]  (the best point)
- *   fractal_search(vec, query)             -> DOUBLE    (cosine distance to it)
+ *   fractal_sfs_converge(vec, query)        -> DOUBLE    (cosine distance to it)
  *   fractal_search_explore(emb, query [, params]) -> DOUBLE[][] (aggregate, Scout)
  * Remaining modules register from their own TUs (see fsql_duckdb_internal.h
  * for the TU map).
@@ -27,7 +27,7 @@
  *   band L (-DFSQL_BAND_L)      -> exactly one DuckDB 1.4.x (FSQL_BAND_L_VER)
  *
  * Per-row hot path
- *   fractal_search(vec, query) runs SFS ONCE per distinct query (memoized per
+ *   fractal_sfs_converge(vec, query) runs SFS ONCE per distinct query (memoized per
  *   executor thread) and reuses the refined best_point for every row of the
  *   scan; per-row cost is one cosine distance.
  *
@@ -49,6 +49,7 @@
 
 #define DUCKDB_EXTENSION_NAME fractalsql
 #include "fsql_duckdb_internal.h"
+#include "fsql_precision.h"
 
 #ifdef FSQL_BAND_L
 #  include "fsql_band_l.h"   /* normally force-included; harmless twice */
@@ -168,15 +169,11 @@ static int run_sfs(tls_state *t, const double *q, size_t dim, int iters, int pop
     return 0;
 }
 
+/* The ONE cosine of this extension: the shared double-precision
+ * implementation in fsql_precision.h. A float*float product is exact in a double, so the
+ * accumulation is double and the result is rounded once. */
 static double cosine_distance(const double *a, const double *b, size_t dim) {
-    double dot = 0, na = 0, nb = 0;
-    for (size_t i = 0; i < dim; i++) {
-        dot += a[i] * b[i];
-        na  += a[i] * a[i];
-        nb  += b[i] * b[i];
-    }
-    if (na == 0 || nb == 0) return 1.0;
-    return 1.0 - dot / (sqrt(na) * sqrt(nb));
+    return fsqlp_cosine_distance_d(a, b, dim);
 }
 
 /* ------------------------------------------------- scalar functions */
@@ -193,7 +190,7 @@ static void version_exec(duckdb_function_info info, duckdb_data_chunk in, duckdb
     for (idx_t i = 0; i < n; i++) duckdb_vector_assign_string_element(out, i, kVersion);
 }
 
-/* fractal_search(vec DOUBLE[], query DOUBLE[]) -> DOUBLE
+/* fractal_sfs_converge(vec DOUBLE[], query DOUBLE[]) -> DOUBLE
  * Cosine distance from each row's vector to the best point SFS finds for the
  * (constant) query. Only row 0 of the query column is read, as in the C++ build. */
 static void search_dist_exec(duckdb_function_info info, duckdb_data_chunk in, duckdb_vector out) {
@@ -242,7 +239,7 @@ static void search_dist_exec(duckdb_function_info info, duckdb_data_chunk in, du
     }
 }
 
-/* fractal_search(query DOUBLE[] [, iterations INT [, population_size INT [,
+/* fractal_sfs_converge(query DOUBLE[] [, iterations INT [, population_size INT [,
  * diffusion_factor INT]]]) -> DOUBLE[]   -- the best point itself. */
 static int int_arg(duckdb_data_chunk in, idx_t nargs_have, idx_t col, idx_t row, int dflt) {
     if (col >= nargs_have) return dflt;
@@ -301,7 +298,7 @@ static void search_best_exec(duckdb_function_info info, duckdb_data_chunk in, du
 /* ------------------------------------------------------------------- */
 /* Scout Mode -- the fractal_search_explore() aggregate                        */
 /* ------------------------------------------------------------------- */
-/* Sniper (fractal_search, above) returns a per-row distance and collapses into a
+/* Sniper (fractal_sfs_converge, above) returns a per-row distance and collapses into a
  * single basin. Scout consumes the WHOLE column as the corpus, runs SFS with
  * walk=0 + return_population (the core then uses the min-distance-to-corpus
  * fitness, so the final population disperses across distinct basins) and returns
@@ -343,6 +340,7 @@ static void explore_destroy(duckdb_aggregate_state *states, idx_t count) {
 }
 
 static bool corpus_append(explore_state *s, const double *v, size_t n) {
+    if (n == 0) return true;   /* an empty list may carry a NULL pointer; memcpy(dst, NULL, 0) is undefined */
     if (n > SIZE_MAX / sizeof(double) || s->corpus_len > SIZE_MAX / sizeof(double) - n) return false;
     size_t need = s->corpus_len + n;
     if (need > s->corpus_cap) {
@@ -550,12 +548,16 @@ static void explore_finalize(duckdb_function_info info, duckdb_aggregate_state *
 /* ------------------------------------------------------------ register */
 
 #define LD FSQL_T_LIST_DOUBLE
+/* The table-free SFS convergence function is fractal_sfs_converge: it runs SFS toward a direction,
+ * it is NOT a retrieval function. It is renamed, NOT aliased -- the old name is now the indexed
+ * search (fractal_search(table, column, query, k, options), registered in fsql_index.c, whose
+ * old-argument forms report the rename. */
 static const fsql_scalar_def kDefs[] = {
-    { "fractal_search", 1, { LD },                                          LD,              search_best_exec, NULL, 0 },
-    { "fractal_search", 2, { LD, LD },                                      FSQL_T_DOUBLE,   search_dist_exec, NULL, 0 },
-    { "fractal_search", 2, { LD, FSQL_T_INTEGER },                          LD,              search_best_exec, NULL, 0 },
-    { "fractal_search", 3, { LD, FSQL_T_INTEGER, FSQL_T_INTEGER },          LD,              search_best_exec, NULL, 0 },
-    { "fractal_search", 4, { LD, FSQL_T_INTEGER, FSQL_T_INTEGER, FSQL_T_INTEGER }, LD,       search_best_exec, NULL, 0 },
+    { "fractal_sfs_converge", 1, { LD },                                          LD,              search_best_exec, NULL, 0 },
+    { "fractal_sfs_converge", 2, { LD, LD },                                      FSQL_T_DOUBLE,   search_dist_exec, NULL, 0 },
+    { "fractal_sfs_converge", 2, { LD, FSQL_T_INTEGER },                          LD,              search_best_exec, NULL, 0 },
+    { "fractal_sfs_converge", 3, { LD, FSQL_T_INTEGER, FSQL_T_INTEGER },          LD,              search_best_exec, NULL, 0 },
+    { "fractal_sfs_converge", 4, { LD, FSQL_T_INTEGER, FSQL_T_INTEGER, FSQL_T_INTEGER }, LD,       search_best_exec, NULL, 0 },
     { "fractal_edition", 0, { 0 }, FSQL_T_VARCHAR, edition_exec, NULL, 0 },
     { "fractal_version", 0, { 0 }, FSQL_T_VARCHAR, version_exec, NULL, 0 },
 };
@@ -646,8 +648,10 @@ static bool fractalsql_init_c_api_internal(duckdb_connection connection, duckdb_
         !fsql_t2s_register(connection, &err) ||
         !fsql_ledger_register(connection, &err) ||
         !fsql_vectorizer_register(connection, &err) ||
+        !fsql_feature_store_register(connection, &err) ||
         !fsql_domain_agents_register(connection, &err) ||
-        !fsql_agents_register(connection, &err)) {
+        !fsql_agents_register(connection, &err) ||
+        !fsql_index_register(connection, &err)) {
         access->set_error(info, err ? err : "fractalsql: registration failed");
         fsql_instance_registration_done(inst);
         return false;

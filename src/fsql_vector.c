@@ -42,6 +42,7 @@
 #include <string.h>
 
 #include "fsql_duckdb_internal.h"
+#include "fsql_precision.h"
 
 /* Supply-side DoS guard: these primitives allocate an output buffer sized to the
  * input dim (twice that for weighted_concat). */
@@ -97,7 +98,40 @@ static float *fbuf_get(fbuf *b, size_t n) {
 /* (LIST(FLOAT), LIST(FLOAT)) -> FLOAT : dot, l2_sq, l2, cosine x2     */
 /* ------------------------------------------------------------------ */
 
+/* Every distance here is computed in DOUBLE by the ONE shared implementation
+ * (fsql_precision.h) and rounded once to float32, because the SQL-visible result
+ * of these functions is a FLOAT (precision plan R2/R5: double accumulation, one
+ * rounding, no contraction, no vectorisation). */
 typedef int (*two_vec_fn)(const float *, const float *, size_t, float *);
+
+static int vec_dot_local(const float *a, const float *b, size_t n, float *out) {
+    *out = (float)fsqlp_dot_f(a, b, n);
+    return FSQL_OK;
+}
+static int vec_l2_sq_local(const float *a, const float *b, size_t n, float *out) {
+    *out = (float)fsqlp_l2_sq_f(a, b, n);
+    return FSQL_OK;
+}
+static int vec_l2_local(const float *a, const float *b, size_t n, float *out) {
+    *out = (float)fsqlp_l2_f(a, b, n);
+    return FSQL_OK;
+}
+static int vec_cos_dist_local(const float *a, const float *b, size_t n, float *out) {
+    *out = (float)fsqlp_cosine_distance_f(a, b, n);
+    return FSQL_OK;
+}
+static int vec_cos_sim_local(const float *a, const float *b, size_t n, float *out) {
+    *out = (float)fsqlp_cosine_similarity_f(a, b, n);
+    return FSQL_OK;
+}
+static int vec_add_local(const float *a, const float *b, size_t n, float *out) {
+    fsqlp_add_f(a, b, n, out);
+    return FSQL_OK;
+}
+static int vec_sub_local(const float *a, const float *b, size_t n, float *out) {
+    fsqlp_sub_f(a, b, n, out);
+    return FSQL_OK;
+}
 
 static void two_vec_to_scalar(duckdb_function_info info, duckdb_data_chunk in, duckdb_vector out, two_vec_fn fn) {
     idx_t n = duckdb_data_chunk_get_size(in);
@@ -123,11 +157,11 @@ static void two_vec_to_scalar(duckdb_function_info info, duckdb_data_chunk in, d
     static void NAME(duckdb_function_info info, duckdb_data_chunk in, duckdb_vector out) { \
         two_vec_to_scalar(info, in, out, FN); }
 
-TWO_VEC_SCALAR(vec_dot_fn,               fsql_vector_dot)
-TWO_VEC_SCALAR(vec_l2_sq_fn,             fsql_vector_l2_sq)
-TWO_VEC_SCALAR(vec_l2_fn,                fsql_vector_l2)
-TWO_VEC_SCALAR(vec_cosine_distance_fn,   fsql_vector_cosine_distance)
-TWO_VEC_SCALAR(vec_cosine_similarity_fn, fsql_vector_cosine_similarity)
+TWO_VEC_SCALAR(vec_dot_fn,               vec_dot_local)
+TWO_VEC_SCALAR(vec_l2_sq_fn,             vec_l2_sq_local)
+TWO_VEC_SCALAR(vec_l2_fn,                vec_l2_local)
+TWO_VEC_SCALAR(vec_cosine_distance_fn,   vec_cos_dist_local)
+TWO_VEC_SCALAR(vec_cosine_similarity_fn, vec_cos_sim_local)
 
 /* (LIST(FLOAT), LIST(FLOAT)) -> LIST(FLOAT) : add, sub */
 static void two_vec_to_vec(duckdb_function_info info, duckdb_data_chunk in, duckdb_vector out, two_vec_fn fn) {
@@ -160,8 +194,8 @@ done:
     static void NAME(duckdb_function_info info, duckdb_data_chunk in, duckdb_vector out) { \
         two_vec_to_vec(info, in, out, FN); }
 
-TWO_VEC_VEC(vec_add_fn, fsql_vector_add)
-TWO_VEC_VEC(vec_sub_fn, fsql_vector_sub)
+TWO_VEC_VEC(vec_add_fn, vec_add_local)
+TWO_VEC_VEC(vec_sub_fn, vec_sub_local)
 
 /* ------------------------------------------------------------------ */
 /* norm, normalize                                                      */
@@ -179,7 +213,7 @@ static void vec_norm_fn(duckdb_function_info info, duckdb_data_chunk in, duckdb_
         if (!g) { fsql_set_null(out, i); continue; }
         if (check_dim(info, an, "fractal_vector_norm")) return;
         float v = 0.0f;
-        if (rc_check(info, fsql_vector_norm(a, an, &v), "fractal_vector_norm")) return;
+        v = (float)fsqlp_norm_f(a, an);
         res[i] = v;
     }
 }
@@ -199,7 +233,7 @@ static void vec_normalize_fn(duckdb_function_info info, duckdb_data_chunk in, du
         if (check_dim(info, an, "fractal_vector_normalize")) goto done;
         float *o = fbuf_get(&ob, an);
         if (!o) { fsql_fn_error(info, "fractalsql: out of memory"); goto done; }
-        if (rc_check(info, fsql_vector_normalize(a, an, o), "fractal_vector_normalize")) goto done;
+        fsqlp_normalize_f(a, an, o);
         if (!fsql_list_out_put_f32(&w, i, o, an)) { fsql_fn_error(info, "fractalsql: out of memory"); goto done; }
     }
 done:
@@ -284,7 +318,7 @@ static void vec_scale_fn(duckdb_function_info info, duckdb_data_chunk in, duckdb
         if (check_dim(info, an, "fractal_vector_scale")) goto done;
         float *o = fbuf_get(&ob, an);
         if (!o) { fsql_fn_error(info, "fractalsql: out of memory"); goto done; }
-        if (rc_check(info, fsql_vector_scale(a, an, sc[i], o), "fractal_vector_scale")) goto done;
+        fsqlp_scale_f(a, an, (double)sc[i], o);
         if (!fsql_list_out_put_f32(&w, i, o, an)) { fsql_fn_error(info, "fractalsql: out of memory"); goto done; }
     }
 done:
@@ -319,8 +353,11 @@ static void vec_weighted_concat_fn(duckdb_function_info info, duckdb_data_chunk 
         /* `out` must not alias a or b: it never does, it is a fresh buffer */
         float *o = fbuf_get(&ob, an + bn);
         if (!o) { fsql_fn_error(info, "fractalsql: out of memory"); goto done; }
-        if (rc_check(info, fsql_vector_weighted_concat(a, an, alpha[i], b, bn, beta[i], o),
-                     "fractal_vector_weighted_concat")) goto done;
+        {   /* accumulated in double, rounded once to float32 (R2) */
+            double al = (double)alpha[i], be = (double)beta[i];
+            for (size_t j = 0; j < an; j++) o[j] = (float)(al * (double)a[j]);
+            for (size_t j = 0; j < bn; j++) o[an + j] = (float)(be * (double)b[j]);
+        }
         if (!fsql_list_out_put_f32(&w, i, o, an + bn)) { fsql_fn_error(info, "fractalsql: out of memory"); goto done; }
     }
 done:
@@ -355,7 +392,7 @@ static void vec_lp_distance_fn(duckdb_function_info info, duckdb_data_chunk in, 
          * not bit-for-bit; 0 < p < 1 is a real Lp value but not a metric. */
         if (!(p > 0.0f)) { fsql_fn_error(info, "fractalsql: fractal_vector_lp_distance: p must be > 0"); return; }
         float d = 0.0f;
-        if (rc_check(info, fsql_vector_lp_distance(a, b, an, p, &d), "fractal_vector_lp_distance")) return;
+        d = (float)fsqlp_lp_distance_f(a, b, an, (double)p);
         res[i] = d;
     }
 }

@@ -13,13 +13,13 @@ SELECT fractal_release(), fractal_release();
 SELECT fractal_release();
 SELECT fractal_schema_context();
 
--- expect: 2.0.1
+-- expect: 2.0.2
 SELECT fractal_release();
 SELECT fractal_version();
 
--- expect: fractal_search_debug
+-- expect: fractal_sfs_converge_debug
 SELECT fractal_release();
-SELECT count(*) > 0 AS ok, 'fractal_search_debug' FROM (SELECT fractal_search_debug([0.1, 0.2, 0.3]::DOUBLE[], 5, 10, 2));
+SELECT count(*) > 0 AS ok, 'fractal_sfs_converge_debug' FROM (SELECT fractal_sfs_converge_debug([0.1, 0.2, 0.3]::DOUBLE[], 5, 10, 2));
 
 -- a function that runs SQL on the caller's database reports that nested queries are off
 -- env: FRACTALSQL_NESTED_QUERIES=off
@@ -32,7 +32,7 @@ SELECT * FROM fractal_search_telemetry('docs', 'v', [0.1, 0.2, 0.3]::DOUBLE[], 3
 
 -- off: everything that needs no nested query still works
 -- env: FRACTALSQL_NESTED_QUERIES=off
--- expect: 2.0.1
+-- expect: 2.0.2
 SELECT fractal_version();
 
 -- env: FRACTALSQL_NESTED_QUERIES=off

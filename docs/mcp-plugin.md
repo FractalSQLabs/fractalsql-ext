@@ -4,7 +4,7 @@
 
 # MCP Plugin
 
-`fractalsql-ext-mcp` is a Model Context Protocol (MCP) server that gives an AI assistant the FractalSQL functions as **81 typed tools**.
+`fractalsql-ext-mcp` is a Model Context Protocol (MCP) server that gives an AI assistant the FractalSQL functions as **106 typed tools**.
 It is a small standalone C++17 program that links `libduckdb` (DuckDB's C library), loads the FractalSQL extension into its own DuckDB, and then
 **locks that DuckDB down** so that nothing a caller or a model-written statement does can read or write a file, fetch or load another extension, or change a setting.
 
@@ -88,7 +88,7 @@ On the HTTP transport a bearer token is the credential. Over stdio there is none
 {
   "tokens": [
     { "name": "analyst", "sha256": "<hex sha256 of that client's token>",
-      "tools": ["fractal_search", "fractal_agent_data_analyst"],
+      "tools": ["fractal_sfs_converge", "fractal_agent_data_analyst"],
       "expires": "2027-01-31T00:00:00Z" },
     { "name": "batch", "sha256": "<hex sha256>", "tools": "*" }
   ]
@@ -193,11 +193,18 @@ Each tool's arguments are described by the `inputSchema` the server publishes in
 | `fractal_feedback_report` | Reports dwell/positive/negative engagement on a prior search result, feeding the shadow store when Diversify is enabled. | writes state |
 | `fractal_hybrid_clinical_search` | Cohort-restricted sibling of fractal_search_telemetry: pass an explicit JSON array of rowid locators to restrict the scan before ranking. | read-only |
 | `fractal_isolate_background` | Convenience wrapper for fractal_feedback_report(result_handle,'negative') with no dwell time: reject the result's neighbourhood outright. | writes state |
-| `fractal_search_debug` | Same Sniper convergence as fractal_search with a full trajectory trace: {dim, generations, population_size, best_point, best_fit, best_fit_per_gen, paths}. | read-only |
+| `fractal_sfs_converge_debug` | Same Sniper convergence as fractal_sfs_converge with a full trajectory trace: {dim, generations, population_size, best_point, best_fit, best_fit_per_gen, paths}. | read-only |
 | `fractal_search_explore` | Scout-mode diverse population search: brute-force relevance scan over your embedding column followed by MMR re-ranking to prevent mode collapse; the anti-collapsed-top-K primitive. | read-only |
-| `fractal_search` | Raw Stochastic Fractal Search: the refined best point for a query, with no table. | read-only |
+| `fractal_sfs_converge` | Raw Stochastic Fractal Search: the refined best point for a query, with no table. | read-only |
 | `fractal_search_telemetry` | Ground-truth K-nearest real table rows to a query vector, by exact cosine distance: [{doc_id, distance, scan_pos}]. | read-only |
 | `fractal_search_trajectory` | Drift-vector search: finds the K nearest rows to (current_vector - baseline_vector) : 'what changed', not 'where am I'. | read-only |
+| `fractal_search` | The indexed search: probes the IVF index built by fractal_index_create and verifies every candidate against the stored vectors, so every distance it returns is exact. Falls back to an exact scan when the table has no index. It does not apply Diversify repulsion. | read-only |
+| `fractal_index_create` | Builds the IVF index over a table's embedding column and stores it in the database; samples rows to calibrate the default nprobe. | writes state |
+| `fractal_index_ensure` | One call that leaves the index on a table and column fit to use: builds it when missing, folds in a few added rows, rebuilds after large changes, and otherwise changes nothing. For a setup script or a scheduled job. |
+| `fractal_index_rebuild` | Full re-cluster from the table's current rows, as a new generation switched in atomically. | writes state |
+| `fractal_index_drop` | Deletes the index's stored cells and metadata; the table and its vectors are untouched. | writes state |
+| `fractal_index_info` | The index's format, dimension, cells, rows indexed against now, the delta and stale flags, the calibrated nprobe and the last search's statistics. | read-only |
+| `fractal_index_candidates` | The candidate row ids for a Scout pass over an indexed table: every row of the nearest cells, plus representatives from the other cells, plus the rows added since the build. | read-only |
 
 ### Cognition (needs a reasoning plugin or an embedding provider)
 
@@ -232,7 +239,7 @@ Each tool's arguments are described by the `inputSchema` the server publishes in
 | `fractal_agent_schedule_workload` | Place a workload on the nearest node by capability vector, with a written justification and confidence. | model |
 | `fractal_agent_track_anomaly` | Track deviation check: nearest peer plus the DFA exponent of the heading series, with a written assessment. | model |
 | `fractal_agent_trajectory_predict` | Project the next state: the drift since a baseline row applied to the current state (rows). | writes state |
-| `fractal_rag_agent` | Retrieval-augmented answer over a table (rows): embeds the question, retrieves, and answers from the hits. | model |
+| `fractal_rag_agent` | Retrieval-augmented answer over a table (rows: answer, source_row_ids, used_index, context_cut): `meta_filter` limits the rows searched. | model |
 | `fractal_search_agent` | Embed a question, search a table, and answer from the hits (rows). | model |
 
 ### Analytics (series, geometry, optimisation, vector math)
@@ -252,10 +259,23 @@ Each tool's arguments are described by the `inputSchema` the server publishes in
 | `fractal_optimize_portfolio` | SFS cardinality-constrained Sharpe-ratio maximizer: the best K assets out of a large universe without brute-force exponential cost. | read-only |
 | `fractal_optimize_subset` | Value-weighted k-subset allocation over ANY scored item list: maximize sum(weight[i]*item_values[i]) with at most k nonzero, each weight<=upper_bounds[i], summing to 1.0. | read-only |
 | `fractal_periodogram` | Classical periodogram via exact O(n^2) DFT (not FFT). | read-only |
+| `fractal_chunk_text` | Splits text into chunks of at most chunk_size characters: `[{no, start, end, text}]`. Pure, no model. | read-only |
 | `fractal_spectrogram_entropy` | Short-time spectral entropy: slides a window over a series and returns, per frame, the normalized Shannon entropy (0..1) of its power spectrum (mean removed, Hann tapered). | read-only |
 | `fractal_state_fingerprint` | Random-hyperplane SimHash (Charikar 2002) of a state vector, returned as a hex string, (n_bits+7)/8 bytes. | read-only |
 | `fractal_tda_persistence_diagram` | Topological persistence over a point cloud's Vietoris-Rips filtration. | read-only |
 | `fractal_vascular_network` | Vessel-network tortuosity + branch-density + fractal dimension from PRE-EXTRACTED graph geometry (not raw imaging). | read-only |
+| `fractal_vector_add` | The element-wise sum of two vectors, as a JSON array of numbers. | read-only |
+| `fractal_vector_cosine_distance` | The cosine distance between two vectors: 0 when they point the same way, 1 when they are orthogonal. | read-only |
+| `fractal_vector_cosine_similarity` | The cosine similarity between two vectors: 1 when they point the same way, 0 when they are orthogonal. | read-only |
+| `fractal_vector_dims` | The vector's dimension: how many components it has. | read-only |
+| `fractal_vector_from_text` | Builds the canonical vector from an array of numbers. On DuckDB the vector is a plain list of floats, so the input is the array itself. | read-only |
+| `fractal_vector_l2_distance` | The L2 (Euclidean) distance between two vectors. | read-only |
+| `fractal_vector_l2_squared` | The squared L2 distance: the same measure without the square root. | read-only |
+| `fractal_vector_norm` | The vector's L2 norm (its magnitude). | read-only |
+| `fractal_vector_normalize` | The vector scaled to unit length. | read-only |
+| `fractal_vector_scale` | The vector multiplied by a scalar factor. | read-only |
+| `fractal_vector_sub` | The element-wise difference of two vectors. | read-only |
+| `fractal_vector_to_json` | Renders a vector as JSON: the array of numbers. | read-only |
 | `fractal_vector_hamming_distance` | Hamming distance between two binary-quantized vectors (hex strings). | read-only |
 | `fractal_vector_lp_distance` | Generalized L_p distance, any p > 0. | read-only |
 | `fractal_vector_quantize_binary` | 1-bit (sign) quantization: 32x compression, (dim+7)/8 bytes, MSB-first, returned as a hex string. | read-only |
@@ -293,6 +313,7 @@ Each tool's arguments are described by the `inputSchema` the server publishes in
 | --- | --- | --- |
 | `fractal_version` | The extension version and edition, the DuckDB version it is running in, and this MCP server's version. | read-only |
 | `fractal_config_get` | The current value of one configuration key. A secret is reported as `***` and never read back. | read-only |
+| `fractal_config_keys` | Every configuration key as `{name, type, session_overridable}` (`string`, `path`, `int`, `bool` or `enum`), so a caller can list the keys instead of hard-coding them. | read-only |
 | `fractal_config_set` | Change one configuration key. Refused unless `FSQL_MCP_CONFIG_WRITES` allows it. | **destructive** |
 | `fractal_configure_reasoning` | Change the reasoning settings in one call: the provider URL, the embedding URL, the chat model, the embedding model and the think mode. | **destructive** |
 
@@ -304,7 +325,7 @@ SELECT fractal_config_set('http_model', 'gpt-oss:20b');
 SELECT fractal_config_set('http_model', '');        -- an empty value unsets it
 ```
 
-The write goes to the process environment, so it is visible to the extension's own `getenv()` on the very next call and to every connection the process opens, and it is gone when the process exits. The keys are `reasoning_plugin`, `http_url`, `http_model`, `http_embed_url`, `http_embed_model`, `http_think`, `http_think_provider`, `http_native_url`, `http_num_ctx`, `http_response_mode`, `http_token` and `enterprise_lib`; an unknown key is refused rather than passed through to the environment. `http_token` is a credential: it can be set, but `fractal_config_get` refuses it, so no `SELECT`, no tool and no log can turn it into output.
+The write goes to the process environment, so it is visible to the extension's own `getenv()` on the very next call and to every connection the process opens, and it is gone when the process exits. The keys are `reasoning_plugin`, `http_url`, `http_model`, `http_embed_url`, `http_embed_model`, `http_think`, `http_think_provider`, `http_native_url`, `http_num_ctx`, `http_response_mode`, `http_allow_plaintext`, `http_token`, `enterprise_lib`, `enterprise_require_signature`, `ledger_retention`, `agent_use_index`, `agent_index_min_rows`, `agent_context_row_bytes`, `text_to_sql_allowed_statements` and `text_to_sql_use_review`. `agent_use_index` is `off` (the default), `on` or `auto`: the retrieval and nearest-row agents search through a `fractal_index`, and `auto` only when the index is ready and the table has at least `agent_index_min_rows` rows. `enterprise_require_signature` can only be turned `on` from SQL; turning the signature requirement off is an operator setting (`FRACTALSQL_ENTERPRISE_REQUIRE_SIGNATURE=0` in the environment). `text_to_sql_allowed_statements` is `select` (the default) or `select_insert_update`, and `text_to_sql_use_review` is `on` or `off`. The other hosts' text-to-SQL attempt limit and ledger-key settings do not apply here: `fractal_text_to_sql` makes 3 attempts, `fractal_sql_agent` takes its limit as an argument, and the ledger is held in memory. An unknown key is refused rather than passed through to the environment. `http_token` is a credential: it can be set, but `fractal_config_get` refuses it, so no `SELECT`, no tool and no log can turn it into output.
 
 
 ## Resources and prompts

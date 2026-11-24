@@ -139,6 +139,9 @@ __pycache__/
 
 # Local tooling and MCP build leftovers
 /kx.db
+# The staging directory the Windows MCP build unpacks libduckdb into
+# (duckdb.dll / duckdb.h / duckdb.lib): a build leftover, never a source file.
+/.work/
 mcp/duckdb.dll
 mcp/*.exe
 mcp/fractalsql-ext-mcp

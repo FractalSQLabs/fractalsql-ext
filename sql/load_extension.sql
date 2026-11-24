@@ -40,12 +40,12 @@ LOAD '/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension';
 -- Verify registration.
 -- ----------------------------------------------------------------------
 SELECT fractal_edition();   -- 'Community'
-SELECT fractal_version();   -- '2.0.1'
+SELECT fractal_version();   -- '2.0.2'
 
 -- ----------------------------------------------------------------------
 -- Basic call.
 -- ----------------------------------------------------------------------
-SELECT fractal_search(
+SELECT fractal_sfs_converge(
     [0.6, 0.8, 0.0]::DOUBLE[],           -- row vector
     [0.6, 0.8, 0.0]::DOUBLE[]            -- query vector
 );
@@ -59,7 +59,7 @@ SELECT
     [random(), random(), random()]::DOUBLE[] AS embedding
 FROM range(1, 1000) t(i);
 
-SELECT id, fractal_search(embedding, [0.5, 0.5, 0.5]::DOUBLE[]) AS dist
+SELECT id, fractal_sfs_converge(embedding, [0.5, 0.5, 0.5]::DOUBLE[]) AS dist
 FROM embeddings
 ORDER BY dist
 LIMIT 10;
@@ -67,7 +67,7 @@ LIMIT 10;
 -- ----------------------------------------------------------------------
 -- Parquet / Iceberg / S3 -- no data movement required.
 -- ----------------------------------------------------------------------
--- SELECT id, fractal_search(embedding, $query::DOUBLE[]) AS dist
+-- SELECT id, fractal_sfs_converge(embedding, $query::DOUBLE[]) AS dist
 -- FROM read_parquet('s3://my-bucket/embeddings/*.parquet')
 -- ORDER BY dist
 -- LIMIT 50;

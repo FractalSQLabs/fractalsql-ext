@@ -15,7 +15,7 @@ Env: CAPI_DIST / EDGE_LINE as in edge_inputs.py. Exit status is nonzero when any
 import os, re, sys
 from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # python3 -I drops the script dir
-from harness_common import signature_policy, PLUGINS, CLEAN_ENV, MOCK_FILES, latest_cli, band_file, run_cli
+from harness_common import signature_policy, PLUGINS, CLEAN_ENV, MOCK_FILES, latest_cli, band_file, run_cli, timeout_for
 
 LINE = os.environ.get("EDGE_LINE", "15")
 CLI, EXT = latest_cli(LINE), band_file(LINE)
@@ -35,12 +35,12 @@ V3 = "[0.1,0.2,0.3]::DOUBLE[]"
 
 T = [
     # ---- search / explore: parameter bounds
-    ("SELECT fractal_search_debug(%s, 0, 10, 2)" % V3,    ("NW", "iterations 0 out of range [1, 10000]")),
-    ("SELECT fractal_search_debug(%s, 5, 0, 2)" % V3,     ("NW", "population_size 0 out of range [1, 10000]")),
-    ("SELECT fractal_search_debug(%s, 5, 10, 99)" % V3,   ("NW", "diffusion_factor 99 out of range [1, 32]")),
-    ("SELECT fractal_search_debug([]::DOUBLE[], 5, 10, 2)", ("NW", "dim 0 out of range")),
-    ("SELECT fractal_search_debug(%s, 5, 10, 2)" % V3,    ("O", r"dim"":3|dim\"\":3")),
-    ("SELECT fractal_search(NULL::DOUBLE[], 5)",          ("N",)),
+    ("SELECT fractal_sfs_converge_debug(%s, 0, 10, 2)" % V3,    ("NW", "iterations 0 out of range [1, 10000]")),
+    ("SELECT fractal_sfs_converge_debug(%s, 5, 0, 2)" % V3,     ("NW", "population_size 0 out of range [1, 10000]")),
+    ("SELECT fractal_sfs_converge_debug(%s, 5, 10, 99)" % V3,   ("NW", "diffusion_factor 99 out of range [1, 32]")),
+    ("SELECT fractal_sfs_converge_debug([]::DOUBLE[], 5, 10, 2)", ("NW", "dim 0 out of range")),
+    ("SELECT fractal_sfs_converge_debug(%s, 5, 10, 2)" % V3,    ("O", r"dim"":3|dim\"\":3")),
+    ("SELECT fractal_sfs_converge(NULL::DOUBLE[], 5)",          ("N",)),
     ("SELECT fractal_search_explore(v, [0.1,0.2]::DOUBLE[]) FROM docs WHERE false", ("N",)),
     ("SELECT length(fractal_search_explore(v, [0.1,0.2,0.3]::DOUBLE[])) FROM docs", ("O", r"^\d+$")),
     ("SELECT fractal_search_explore(v, [0.1,0.2,0.3]::DOUBLE[]) FROM ragged", ("E", "inconsistent embedding dim")),
@@ -54,7 +54,7 @@ T = [
     # ---- the SFS work cap: iterations x population_size x diffusion_factor x dim must not exceed 2^31.
     # Every factor is in range on its own here (10000/10000/32 are the ceilings), so only the product can
     # catch the call -- and each row is refused BEFORE the search runs, so the row itself stays cheap.
-    ("SELECT fractal_search(%s, 10000, 10000, 32)" % V3, ("E", "search too large (iterations x population_size x diffusion_factor x dim exceeds 2147483648)")),
+    ("SELECT fractal_sfs_converge(%s, 10000, 10000, 32)" % V3, ("E", "search too large (iterations x population_size x diffusion_factor x dim exceeds 2147483648)")),
     ("SELECT count(*) FROM fractal_search_explore('docs','v',%s,'{\"iterations\": 10000, \"population_size\": 10000, \"diffusion_factor\": 32}')" % V3, ("E", "search too large (iterations x population_size x diffusion_factor x dim exceeds 2147483648)")),
     ("SELECT answer FROM fractal_search_agent('a question', 'docs', 'v', 10000, 10000)", ("E", "search too large (iterations x population_size x diffusion_factor x dim exceeds 2147483648)")),
     # ---- the k-subset work cap: item count x k must not exceed 2^24.
@@ -219,7 +219,7 @@ T = [
     ("CREATE TABLE pt (pid VARCHAR, v DOUBLE[]); INSERT INTO pt VALUES ('12',[0.9,0.1,0.0]),('-0',[0.8,0.2,0.1]),('01',[0.1,0.9,0.2]),('1.5',[0.0,0.2,0.9]),('1.',[0.5,0.5,0.0]),('1e3',[0.4,0.4,0.2]),('1E+3',[0.3,0.3,0.3]),('1e',[0.2,0.2,0.6]),('-',[0.6,0.2,0.2]),('abc',[0.7,0.1,0.1]),('+1',[0.2,0.7,0.1]),('1e+',[0.15,0.15,0.7]),('1.5e-2',[0.35,0.35,0.3]),('',[0.45,0.45,0.1]); SELECT fractal_agent_patient_deterioration_triage('pt','v',[0.9,0.1,0.0]::DOUBLE[],[0.8,0.2,0.0]::DOUBLE[],[0.5,0.4,0.1]::DOUBLE[],NULL::BIGINT[],20,'pid')", ("O", r'nearest_cohort_id"":12,')),
     ("CREATE TABLE pt (pid VARCHAR, v DOUBLE[]); INSERT INTO pt VALUES ('12',[0.9,0.1,0.0]),('-0',[0.8,0.2,0.1]),('01',[0.1,0.9,0.2]),('1.5',[0.0,0.2,0.9]),('1.',[0.5,0.5,0.0]),('1e3',[0.4,0.4,0.2]),('1E+3',[0.3,0.3,0.3]),('1e',[0.2,0.2,0.6]),('-',[0.6,0.2,0.2]),('abc',[0.7,0.1,0.1]),('+1',[0.2,0.7,0.1]),('1e+',[0.15,0.15,0.7]),('1.5e-2',[0.35,0.35,0.3]),('',[0.45,0.45,0.1]); SELECT fractal_agent_patient_deterioration_triage('pt','v',[0.1,0.9,0.2]::DOUBLE[],[0.8,0.2,0.0]::DOUBLE[],[0.5,0.4,0.1]::DOUBLE[],NULL::BIGINT[],20,'pid')", ("O", r'nearest_cohort_id"":""01"",')),
     ("CREATE TABLE pt (pid VARCHAR, v DOUBLE[]); INSERT INTO pt VALUES ('12',[0.9,0.1,0.0]),('-0',[0.8,0.2,0.1]),('01',[0.1,0.9,0.2]),('1.5',[0.0,0.2,0.9]),('1.',[0.5,0.5,0.0]),('1e3',[0.4,0.4,0.2]),('1E+3',[0.3,0.3,0.3]),('1e',[0.2,0.2,0.6]),('-',[0.6,0.2,0.2]),('abc',[0.7,0.1,0.1]),('+1',[0.2,0.7,0.1]),('1e+',[0.15,0.15,0.7]),('1.5e-2',[0.35,0.35,0.3]),('',[0.45,0.45,0.1]); SELECT fractal_agent_patient_deterioration_triage('pt','v',[0.7,0.1,0.1]::DOUBLE[],[0.8,0.2,0.0]::DOUBLE[],[0.5,0.4,0.1]::DOUBLE[],NULL::BIGINT[],20,'pid')", ("O", r'nearest_cohort_id"":""abc"",')),
-    ("CREATE TABLE pt (pid VARCHAR, v DOUBLE[]); INSERT INTO pt VALUES ('12',[0.9,0.1,0.0]),('-0',[0.8,0.2,0.1]),('01',[0.1,0.9,0.2]),('1.5',[0.0,0.2,0.9]),('1.',[0.5,0.5,0.0]),('1e3',[0.4,0.4,0.2]),('1E+3',[0.3,0.3,0.3]),('1e',[0.2,0.2,0.6]),('-',[0.6,0.2,0.2]),('abc',[0.7,0.1,0.1]),('+1',[0.2,0.7,0.1]),('1e+',[0.15,0.15,0.7]),('1.5e-2',[0.35,0.35,0.3]),('',[0.45,0.45,0.1]); SELECT fractal_agent_patient_deterioration_triage('pt','v',[0.45,0.45,0.1]::DOUBLE[],[0.8,0.2,0.0]::DOUBLE[],[0.5,0.4,0.1]::DOUBLE[],NULL::BIGINT[],20,'pid')", ("O", r'nearest_cohort_id"":null,')),
+    ("CREATE TABLE pt (pid VARCHAR, v DOUBLE[]); INSERT INTO pt VALUES ('12',[0.9,0.1,0.0]),('-0',[0.8,0.2,0.1]),('01',[0.1,0.9,0.2]),('1.5',[0.0,0.2,0.9]),('1.',[0.5,0.5,0.0]),('1e3',[0.4,0.4,0.2]),('1E+3',[0.3,0.3,0.3]),('1e',[0.2,0.2,0.6]),('-',[0.6,0.2,0.2]),('abc',[0.7,0.1,0.1]),('+1',[0.2,0.7,0.1]),('1e+',[0.15,0.15,0.7]),('1.5e-2',[0.35,0.35,0.3]),('',[0.45,0.45,0.1]); SELECT fractal_agent_patient_deterioration_triage('pt','v',[0.45,0.45,0.1]::DOUBLE[],[0.8,0.2,0.0]::DOUBLE[],[0.5,0.4,0.1]::DOUBLE[],NULL::BIGINT[],20,'pid')", ("O", r'nearest_cohort_id"":""""')),
     # ---- the vectorizer queue with more than 8 vectorizers (the config table grows), an empty text, and explicit batch / stale arguments
     ("CREATE TABLE vt0 (id INTEGER, body VARCHAR, emb DOUBLE[]); INSERT INTO vt0 VALUES (1,'alpha',NULL),(2,'',NULL),(3,'gamma',NULL); CREATE TABLE vt1 (id INTEGER, body VARCHAR, emb DOUBLE[]); INSERT INTO vt1 VALUES (1,'alpha',NULL),(2,'',NULL),(3,'gamma',NULL); CREATE TABLE vt2 (id INTEGER, body VARCHAR, emb DOUBLE[]); INSERT INTO vt2 VALUES (1,'alpha',NULL),(2,'',NULL),(3,'gamma',NULL); CREATE TABLE vt3 (id INTEGER, body VARCHAR, emb DOUBLE[]); INSERT INTO vt3 VALUES (1,'alpha',NULL),(2,'',NULL),(3,'gamma',NULL); CREATE TABLE vt4 (id INTEGER, body VARCHAR, emb DOUBLE[]); INSERT INTO vt4 VALUES (1,'alpha',NULL),(2,'',NULL),(3,'gamma',NULL); CREATE TABLE vt5 (id INTEGER, body VARCHAR, emb DOUBLE[]); INSERT INTO vt5 VALUES (1,'alpha',NULL),(2,'',NULL),(3,'gamma',NULL); CREATE TABLE vt6 (id INTEGER, body VARCHAR, emb DOUBLE[]); INSERT INTO vt6 VALUES (1,'alpha',NULL),(2,'',NULL),(3,'gamma',NULL); CREATE TABLE vt7 (id INTEGER, body VARCHAR, emb DOUBLE[]); INSERT INTO vt7 VALUES (1,'alpha',NULL),(2,'',NULL),(3,'gamma',NULL); CREATE TABLE vt8 (id INTEGER, body VARCHAR, emb DOUBLE[]); INSERT INTO vt8 VALUES (1,'alpha',NULL),(2,'',NULL),(3,'gamma',NULL); CREATE TABLE vt9 (id INTEGER, body VARCHAR, emb DOUBLE[]); INSERT INTO vt9 VALUES (1,'alpha',NULL),(2,'',NULL),(3,'gamma',NULL); SELECT fractal_vectorizer_create('vt0','id','body','emb'); SELECT fractal_vectorizer_create('vt1','id','body','emb'); SELECT fractal_vectorizer_create('vt2','id','body','emb'); SELECT fractal_vectorizer_create('vt3','id','body','emb'); SELECT fractal_vectorizer_create('vt4','id','body','emb'); SELECT fractal_vectorizer_create('vt5','id','body','emb'); SELECT fractal_vectorizer_create('vt6','id','body','emb'); SELECT fractal_vectorizer_create('vt7','id','body','emb'); SELECT fractal_vectorizer_create('vt8','id','body','emb'); SELECT fractal_vectorizer_create('vt9','id','body','emb'); SELECT fractal_vectorizer_process_queue(5, 10)", ("O", r"^\d+$")),
     # ---- the audit payload's JSON check: every number shape and string escape it accepts, and each way it rejects a malformed one
@@ -280,7 +280,7 @@ def run(i):
                 "FSQL_REASONING_HTTP_EMBED_MODEL": "mock-embed", "FSQL_MOCK_EMBED_DIM": "768"})
     script = "LOAD '%s';\n%s\nSELECT '@@START';\n%s\nSELECT '@@END';\nSELECT fractal_release();\n" % (EXT, PRELUDE, sql if sql.endswith(";") else sql + ";")
     # the outcome of the statement under test is what lies between the markers on stdout (and anything on stderr)
-    p = run_cli([CLI, "-unsigned", "-csv", "-noheader", "-bail"], input=script, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=120)
+    p = run_cli([CLI, "-unsigned", "-csv", "-noheader", "-bail"], input=script, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env, timeout=timeout_for(120))
     return i, p
 
 

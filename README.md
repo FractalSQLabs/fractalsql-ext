@@ -18,7 +18,7 @@ data already lives, so embeddings sitting in Parquet / Iceberg / S3 stay put
 (Zero-ETL into a separate vector DB):
 
 ```sql
-SELECT id, fractal_search(embedding, $query::DOUBLE[]) AS dist
+SELECT id, fractal_sfs_converge(embedding, $query::DOUBLE[]) AS dist
 FROM read_parquet('s3://my-bucket/embeddings/*.parquet')
 ORDER BY dist LIMIT 50;
 ```
@@ -83,8 +83,10 @@ Depending on your role, you'll want to start in different places:
 Four tiers of SQL-callable primitives, composable into agents with plain SQL
 and application code, with no server-side language required.
 
-- **Discovery**: diverse, mode-collapse-free retrieval: `fractal_search`
-  (Sniper), `fractal_search_explore` (Scout).
+- **Discovery**: diverse, mode-collapse-free retrieval: `fractal_sfs_converge`
+  (Sniper), `fractal_search_explore` (Scout), and the indexed `fractal_search`
+  (nearest rows of a table, through the native IVF index built with
+  `fractal_index_create`, with every distance still exact).
 - **Cognition**: in-process LLM integration: `fractal_reason` (Bedrock, Azure
   OpenAI, Vertex, Ollama), `fractal_embed`, `fractal_text_to_sql`.
 - **Agency**: self-correcting routines: the search/sql agents,
@@ -116,9 +118,9 @@ fully functional and Cognition/Agency return clean precondition errors.
 
 ```
 fractal_edition() -> VARCHAR                     -- 'Community'
-fractal_version() -> VARCHAR                     -- '2.0.1'
-fractal_search(vector DOUBLE[], query DOUBLE[]) -> DOUBLE
-fractal_search_debug(vector, k, max_iter, mdn) -> VARCHAR
+fractal_version() -> VARCHAR                     -- '2.0.2'
+fractal_sfs_converge(vector DOUBLE[], query DOUBLE[]) -> DOUBLE
+fractal_sfs_converge_debug(vector, k, max_iter, mdn) -> VARCHAR
 fractal_search_explore(column, query[, options])           -- Scout aggregate
 fractal_search_explore(table, column, query, opts)  -- Scout table function
 fractal_reason(text[, prompt])                      -- via reasoning plugin
@@ -153,7 +155,7 @@ The file name includes the DuckDB version it targets. See the
 ```sql
 LOAD '/path/to/fractalsql.v1.5.6.linux_amd64.duckdb_extension';
 SELECT fractal_edition(), fractal_version();
--- returns: ('Community', '2.0.1')
+-- returns: ('Community', '2.0.2')
 ```
 
 3. **Or programmatic (Python / Node / R)**:
@@ -234,7 +236,7 @@ make                # native build -> dist/<platform>/ (Linux and macOS)
 ./build.sh amd64    # in Docker (glibc 2.34 baseline), one file per DuckDB version:
 ./build.sh arm64    #   dist/<arch>/fractalsql.v1.4.5.linux_<arch>.duckdb_extension
                     #   dist/<arch>/fractalsql.v1.5.6.linux_<arch>.duckdb_extension
-                    #   dist/<arch>/fractalsql.v2.0.1.linux_<arch>.duckdb_extension
+                    #   dist/<arch>/fractalsql.v2.0.2.linux_<arch>.duckdb_extension
 ```
 
 On Windows, run `scripts\windows\build.bat` from a Developer Command Prompt

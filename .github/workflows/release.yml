@@ -104,7 +104,7 @@ jobs:
           probe "functions-visible" \
               "SELECT function_name FROM duckdb_functions() WHERE function_name LIKE 'fractal%';"
           probe "fractal-search-scalar" \
-              "SELECT fractal_search([0.6, 0.8]::DOUBLE[], [0.6, 0.8]::DOUBLE[]);"
+              "SELECT fractal_sfs_converge([0.6, 0.8]::DOUBLE[], [0.6, 0.8]::DOUBLE[]);"
 
           # Full smoke test last -- if earlier probes pass, this tells
           # us whether the crash is in the vectorized-execution path.
@@ -181,7 +181,7 @@ jobs:
           DUCKDB_VERSION: ${{ matrix.duckdb_version }}
         run: |
           set -euo pipefail
-          VERSION="2.0.1"
+          VERSION="2.0.2"
           DIST_DIR="dist/packages"
           mkdir -p "${DIST_DIR}"
           EXT_NAME="fractalsql.${DUCKDB_VERSION}.${{ matrix.platform_tag }}.duckdb_extension"
@@ -255,7 +255,7 @@ jobs:
           DUCKDB_VERSION: ${{ matrix.duckdb_version }}
         run: |
           $ErrorActionPreference = "Stop"
-          $VERSION = "2.0.1"
+          $VERSION = "2.0.2"
           $DIST_DIR = "dist/packages"
           New-Item -ItemType Directory -Force -Path $DIST_DIR | Out-Null
           $EXT_NAME = "fractalsql.$env:DUCKDB_VERSION.windows_amd64.duckdb_extension"
