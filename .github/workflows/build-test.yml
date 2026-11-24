@@ -82,7 +82,7 @@ jobs:
       GATE_SET: ${{ github.event_name == 'workflow_dispatch' && inputs.gate_set || 'default' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ------------------------------------------------------------
       # Linux: docker build.sh + POSIX gate suite.
@@ -347,7 +347,7 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -417,7 +417,7 @@ jobs:
       DUCKDB_VERSION: v1.5.6
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install toolchain
         run: |
@@ -462,7 +462,7 @@ jobs:
       DUCKDB_VERSION: v1.5.6
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install toolchain (macOS)
         run: |
@@ -512,7 +512,7 @@ jobs:
       DUCKDB_VERSION: v1.5.6
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install toolchain
         run: |
@@ -560,7 +560,7 @@ jobs:
       DUCKDB_VERSION: v1.5.6
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install toolchain + lcov
         run: |

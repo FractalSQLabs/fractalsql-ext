@@ -43,7 +43,7 @@ jobs:
     name: Build extension + load in DuckDB CLI (linux_amd64)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
 
       - name: Build fractalsql.duckdb_extension
@@ -211,7 +211,7 @@ jobs:
     needs: build-and-load
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           name: extensions-amd64
@@ -268,7 +268,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Package fractalsql-ext-mcp (DuckDB v1.5.6, built in rockylinux:9)
         run: bash scripts/package_mcp_rocky.sh v1.5.6 ${{ matrix.arch }}
       - name: Unpack and run in a clean rockylinux:9
@@ -305,7 +305,7 @@ jobs:
     env:
       DV: v1.5.6
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and package fractalsql-ext-mcp
         run: |
           set -euo pipefail
@@ -359,7 +359,7 @@ jobs:
     env:
       DUCKDB_VERSION: v1.5.6
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install OpenSSL (vcpkg, static triplet)
         shell: cmd
         run: |
@@ -426,7 +426,7 @@ jobs:
           - os-tag: windows
             runner: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The CLI is optional for both scripts, but with one present the
       # dry-run exercises the detection path: the script matches the
