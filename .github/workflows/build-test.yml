@@ -546,15 +546,16 @@ jobs:
           ./build_test.sh --tsan
 
   # --------------------------------------------------------------------
-  # Coverage: build_test.sh --coverage runs the MCP server gates against a gcov build, then the extension's own
-  # sources (src/*.c) through test/coverage_run.sh, which fails below 80% lines, functions or branches. Linux only:
+  # Coverage: build_test.sh --coverage --fault runs the MCP server gates against a gcov build, then the extension's
+  # own sources (src/*.c) through test/coverage_run.sh over the full stage list, which fails below its floors
+  # (80% lines and functions; 75% branches, where the corpus actually reaches). Linux only:
   # MSVC has no gcov, and the lcov pipeline is proven on one platform.
   # --------------------------------------------------------------------
   coverage:
     name: coverage (lcov)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       DUCKDB_VERSION: v1.5.6
     steps:
@@ -591,10 +592,13 @@ jobs:
       - name: Build fractalsql.duckdb_extension (native make)
         run: make
 
-      - name: build_test.sh --coverage
+      - name: build_test.sh --coverage --fault
         run: |
           chmod +x build_test.sh
-          ./build_test.sh --coverage
+          # The floors measure the full stage set (parity, the edge matrix, lifecycle, the OOM sweep), so the
+          # source-coverage pass runs them all: the quick pass alone reports lines/functions only, and the branch
+          # share lives in the deep error paths those stages drive.
+          ./build_test.sh --coverage --fault
 
       - name: Upload coverage report
         if: always()

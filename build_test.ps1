@@ -3168,29 +3168,29 @@ function gate_25 {
     skip "python driver gate under -Asan/-Ubsan: the pip-duckdb host process cannot be instrumented (known Windows load_extension issue)"
     return
   }
+  # The driver needs the pip duckdb module: when the cell cannot run it at all, skip here -- before the
+  # mock core is resolved -- so the check does not fail on a gate that could never run.
+  if (-not $script:PY) {
+    skip "python with the pip duckdb package is unavailable (set FSQL_PYTHON)"
+    return
+  }
   # the real core when FSQL_TEST_ENTERPRISE_LIB names it, otherwise the mock core (test\mock_enterprise.c, built by the test harness)
   $origEntlib = $env:FSQL_TEST_ENTERPRISE_LIB
   $entlib = $origEntlib
   if ((-not $entlib) -or (-not (Test-Path -LiteralPath $entlib))) {
-    if ($script:PY) {
-      # harness_common compiles the mock core at import with the gcc-style compiler named by
-      # FSQL_CC -- the same one compile_plugins uses. Without it the import probes plain "gcc",
-      # which is not on a Windows runner's PATH, and the core is reported as never built.
-      $env:FSQL_CC = $script:CC
-      try {
-        $entlib = (& $script:PY -I -c "import sys; sys.path.insert(0, sys.argv[1]); from harness_common import PLUGINS; print(PLUGINS.get('mock_enterprise', ''))" (Join-Path $script:HERE "test") 2>$null | Select-Object -Last 1)
-      } finally {
-        Remove-Item Env:FSQL_CC -ErrorAction SilentlyContinue
-      }
+    # harness_common compiles the mock core at import with the gcc-style compiler named by
+    # FSQL_CC -- the same one compile_plugins uses. Without it the import probes plain "gcc",
+    # which is not on a Windows runner's PATH, and the core is reported as never built.
+    $env:FSQL_CC = $script:CC
+    try {
+      $entlib = (& $script:PY -I -c "import sys; sys.path.insert(0, sys.argv[1]); from harness_common import PLUGINS; print(PLUGINS.get('mock_enterprise', ''))" (Join-Path $script:HERE "test") 2>$null | Select-Object -Last 1)
+    } finally {
+      Remove-Item Env:FSQL_CC -ErrorAction SilentlyContinue
     }
     if ((-not $entlib) -or (-not (Test-Path -LiteralPath $entlib))) {
       fail "25 enterprise_stress: the mock enterprise core did not build (set FSQL_TEST_ENTERPRISE_LIB to use the real one)"
       return
     }
-  }
-  if (-not $script:PY) {
-    skip "python with the pip duckdb package is unavailable (set FSQL_PYTHON)"
-    return
   }
   $pyMajor = pip_duckdb_major
   if ($pyMajor -ne $script:DUCK_MAJOR) {
